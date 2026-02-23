@@ -1,0 +1,109 @@
+🌀 FAN RELAY DUAL SENSOR FIX - COMPLETE TESTING GUIDE
+
+✅ CHANGES MADE:
+
+Backend (app.py):
+1. Updated POST /api/relay-configs endpoint to handle DUAL SENSOR format
+   - Checks if index == 1 AND 'target1' in data
+   - Saves as: {target1, condition1, param1, target2, condition2, param2, logic}
+   - Added detailed logging of received data and saved config
+
+2. Enhanced evaluate_auto_mode() logging
+   - Shows relay modes and configs at start
+   - Shows current sensor values
+   - Shows each condition evaluation step
+   - Shows final decision (should_turn_on)
+
+Frontend (App.jsx):
+1. Enhanced console logging when saving config
+   - Shows what config is being sent to backend
+   - Shows backend response
+   - Shows error details if save fails
+
+🧪 STEP-BY-STEP TESTING:
+
+STEP 1: Open Browser Developer Console
+- Press F12 to open console
+- Keep it open while testing
+
+STEP 2: Set Fan to AUTO Mode
+1. Open http://100.119.101.9:5174/
+2. Go to CONTROL PAGE
+3. Click AUTO button on Fan
+4. Watch console - should show:
+   ✅ 📤 Backend: Relay 1 → AUTO (200)
+
+STEP 3: Set Dual Sensor Config
+1. Click ⚙️ EDIT CONFIG on Fan
+2. Set values:
+   - Sensor 1: Temperature > 12
+   - Sensor 2: (any value, doesn't matter for now)
+   - Logic: OR
+3. Click ✅ SAVE
+4. Watch console - should show:
+   
+   🌀 FAN CONFIG (Dual Sensor):
+   Logic: OR
+   Sensor 1: temp > 12
+   Sensor 2: hum > [value]
+   ✅ Relay 1 config saved to backend:
+   {target1: 12, condition1: ">", param1: "temp", ...}
+
+STEP 4: Check Backend Log File
+- Open terminal and run:
+  tail -f /home/admin/PlatformIOProjects/SmartFarmMQTT-main/MyWeb/backend.log | grep -E "(🔧|🔍|📡|AUTO)"
+
+- You should see:
+  🔧 POST /api/relay-configs - Received data: {...target1: 12...}
+  🔧 AUTO Config Updated - Fan (Dual): (temp > 12) OR (hum > ...)
+  ✅ Config saved - relay_configs[1]: {...}
+
+STEP 5: Verify Evaluation
+- When new sensor data arrives, backend should show:
+  🔍 AUTO Evaluation Start - Modes: {0: 'MANUAL', 1: 'AUTO', ...}
+  🔍 Configs: {0: {...}, 1: {...target1: 12...}, ...}
+  🔍 Relay 1: Mode=AUTO
+  🔍 Relay 1 DUAL Config: (temp > 12) OR (...)
+  🔍 Relay 1: Sensor1(temp)=27.0, Sensor2(hum)=38.5
+  🔍 Relay 1: 27.0 > 12 = True
+  🔍 Relay 1: 38.5 > [target2] = [True/False]
+  🔍 Relay 1: True OR [result2] = True
+  🔍 Relay 1: Previous=None, New=True
+  📡 Published MQTT: {"type": "RELAY", "index": 1, "value": true}
+  🤖 AUTO Mode: Fan 🌬️ → ON ✅
+
+🔧 IF RELAY DOESN'T TURN ON:
+
+Check #1: Is mode set to AUTO?
+- Backend log should show: 🔍 Relay 1: Mode=AUTO
+- If shows MANUAL, click AUTO button again
+
+Check #2: Is config saved correctly?
+- Backend log should show: 🔧 AUTO Config Updated - Fan (Dual)
+- If not shown, check frontend console for POST errors
+
+Check #3: Are sensor values correct?
+- Log shows: 🔍 Relay 1: Sensor1(temp)=X, Sensor2(hum)=Y
+- Verify these values meet your condition targets
+
+Check #4: Is condition logic correct?
+- Your example: temp > 12, current temp = 27.0
+- Should evaluate to: 27.0 > 12 = True ✓
+- Look for: 🔍 Relay 1: 27.0 > 12 = True
+
+📝 EXPECTED VALUES (from latest logs):
+- temp = 27.0°C (should trigger if > 12) ✓
+- hum = 38.5% 
+- soil_1_hum = 75.2%
+- soil_2_hum = 69.8%
+- lux = 80.0
+
+💡 QUICK DEBUG:
+1. Browser Console: Shows frontend→backend communication
+2. Backend Log: Shows config storage and evaluation
+3. Both should show SUCCESS if working correctly
+
+If still not working after these steps, please share:
+1. Screenshot of browser console
+2. Last 50 lines of backend.log
+3. Your exact config settings (target1, condition1, param1, etc.)

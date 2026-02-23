@@ -1,0 +1,159 @@
+# Smart Farm MQTT System - Cursor Rules
+
+## Project Overview
+Smart Farm MQTT is an IoT-based smart farming system that combines:
+- Embedded C++ firmware for sensor nodes and relay controllers (PlatformIO)
+- Python Flask backend for automation and data management
+- React + Vite frontend dashboard for monitoring and control
+- MQTT for real-time communication between devices
+
+## Architecture & Technology Stack
+
+### Backend Components
+- **Embedded Systems**: PlatformIO with Arduino/ESP32
+  - `src/node1_sensor.cpp` - Sensor reading node
+  - `src/node2_relay.cpp` - Relay control node
+  - Uses MQTT for inter-node communication
+  
+- **Python Backend** (`MyWeb/app.py`):
+  - Flask web server
+  - MQTT broker integration
+  - Automation logic and scheduling
+  - Data persistence (JSON files)
+  
+- **Frontend** (`smart-farm-dashboard/`):
+  - React with Vite build tool
+  - Tailwind CSS for styling
+  - Real-time MQTT data via WebSocket
+  - Multiple pages: Monitor, Control, Automation, Graph, History
+
+## Code Style & Conventions
+
+### C++ (Embedded)
+- Use PlatformIO library format
+- Include proper error handling and timeouts
+- Use meaningful variable names in English
+- Add comments for complex MQTT message handling
+- Follow Arduino/ESP32 best practices for power management
+
+### Python
+- PEP 8 compliant
+- Use Flask blueprints for modular routes
+- Implement proper MQTT QoS levels
+- Use configuration files (JSON) for automation rules
+- Add docstrings for functions
+
+### JavaScript/React
+- Use ES6+ syntax
+- Functional components with React Hooks
+- Use `useMqttData.js` hook for state management
+- Tailwind utility classes for styling
+- Component names use PascalCase
+- File extensions: `.jsx` for React components
+
+## Folder Structure & Naming
+
+```
+/src                    - C++ firmware source
+  ├── node1_sensor.cpp  - Sensor node implementation
+  └── node2_relay.cpp   - Relay control implementation
+  
+/MyWeb                  - Python Flask backend
+  ├── app.py            - Main Flask application
+  ├── automation_config.json - Automation rules
+  └── templates/index.html - Web interface
+
+/smart-farm-dashboard   - React frontend
+  ├── src/
+  │   ├── components/   - React components (PascalCase)
+  │   ├── hooks/        - Custom hooks (useCamelCase)
+  │   └── pages/        - Page components
+  ├── vite.config.js    - Vite configuration
+  └── tailwind.config.js - Tailwind configuration
+
+/include                - C++ header files
+/lib                    - External libraries for PlatformIO
+/platformio.ini         - PlatformIO project configuration
+```
+
+## Key Features & Patterns
+
+### MQTT Communication
+- Topics follow pattern: `farm/[device]/[type]` (e.g., `farm/sensor/temperature`)
+- QoS 1 for most messages, QoS 2 for critical data
+- Implement proper subscribe/publish handlers
+- Use JSON for complex message payloads
+
+### State Management
+- Frontend uses custom `useMqttData.js` hook for real-time updates
+- Backend maintains state in JSON configuration files
+- Implement proper error handling for disconnections
+
+### Automation
+- Rules stored in `automation_config.json`
+- Time-based and sensor-triggered actions
+- Relay control through MQTT messages
+- Log all automation actions
+
+### Data Persistence
+- Use JSON files for configuration and recent data
+- Store in `MyWeb/` directory
+- Implement atomic writes to prevent corruption
+
+## Development Guidelines
+
+### Before Coding
+1. Check existing components and utilities to avoid duplication
+2. Understand the MQTT message flow for the feature
+3. Review related components in the same directory
+
+### Code Quality
+- Write self-documenting code with clear variable names
+- Add comments for non-obvious logic
+- Handle edge cases and error scenarios
+- Implement proper cleanup (disconnect MQTT, close files)
+
+### Testing
+- Test MQTT connectivity with proper timeout handling
+- Verify data types and message formats
+- Test in both connected and disconnected states
+- Check relay control safety mechanisms
+
+### Documentation
+- Update component JSDoc comments
+- Document MQTT topics and message formats
+- Note any hardware-specific configurations
+
+## Important Project Details
+
+### NPK & Temperature/Humidity Monitoring
+- Components: `NPK.jsx`, `NPKCard.jsx`, `TH.jsx` for data display
+- Store sensor readings in structured format
+- Display real-time and historical data
+
+### Device Control
+- `RelayControl.jsx` and `RelayStatus.jsx` - relay management
+- Ensure safe relay transitions
+- Implement confirmation for critical actions
+
+### Automation Panel
+- `AutomationPage.jsx` - configure automation rules
+- `automation_config.json` - persistent configuration
+- Validate automation rules before saving
+
+## Performance Considerations
+- Use debouncing for frequent MQTT messages in frontend
+- Implement reconnection logic for MQTT
+- Optimize re-renders in React components
+- Use appropriate MQTT QoS levels to balance reliability and bandwidth
+
+## Security Notes
+- Validate all user inputs
+- Sanitize data before rendering
+- Implement proper MQTT authentication if required
+- Protect sensitive configuration files
+
+## Common Commands
+- PlatformIO: `pio run` (build), `pio run -t upload` (deploy)
+- Frontend: `npm run dev` (development), `npm run build` (production)
+- Backend: `python app.py` (start Flask server)

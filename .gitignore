@@ -1,0 +1,18 @@
+# ไฟล์ความลับ (ห้ามหลุดเด็ดขาด)
+credentials.json
+client_secret.json
+*.pem
+.env
+
+# ไฟล์ขยะของ Python
+__pycache__/
+*.pyc
+
+# ไฟล์ขยะของ Node.js (React)
+node_modules/
+dist/
+.DS_Store
+
+# ไฟล์ขยะของ PlatformIO
+.pio/
+.vscode/

@@ -1,0 +1,17 @@
+[Unit]
+Description=Smart Farm MQTT Backend
+After=network.target mosquitto.service
+Wants=mosquitto.service
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/home/pi/SmartFarmMQTT/MyWeb
+ExecStart=/home/pi/SmartFarmMQTT/MyWeb/venv/bin/python app.py
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

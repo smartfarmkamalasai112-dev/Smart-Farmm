@@ -1,0 +1,57 @@
+🔧 DUAL SENSOR FAN CONFIG - DEBUGGING GUIDE
+
+✅ CHANGES MADE:
+
+1. FRONTEND (App.jsx):
+   - Fixed Auto Mode display for Fan to show dual sensor config
+   - Shows: (param1 condition1 target1) LOGIC (param2 condition2 target2)
+   - Example: (temp > 30) OR (hum > 80)
+
+2. BACKEND (app.py):
+   - Fixed evaluate_auto_mode() to properly evaluate dual conditions
+   - Replaced function-based sensor value retrieval with inline logic
+   - Added detailed logging at each step:
+     * Logs sensor values for both sensors
+     * Logs condition evaluation results
+     * Logs final decision (should_turn_on)
+     * Logs MQTT publish action
+
+🧪 HOW TO TEST:
+
+1. Open Dashboard: http://100.119.101.9:5174/
+
+2. Go to CONTROL PAGE
+
+3. For Fan relay:
+   - Click MODE button to set to AUTO
+   - Click ⚙️ EDIT CONFIG
+   - Set Sensor 1: temp > 30
+   - Set Sensor 2: hum > 80
+   - Choose OR logic
+   - Click ✅ SAVE
+
+4. Watch Backend Logs:
+   - Refresh page or check browser console
+   - Look for messages like:
+     * "🔍 Relay 1 DUAL Config: (temp > 30) OR (hum > 80)"
+     * "🔍 Relay 1: Sensor1(temp)=25.5, Sensor2(hum)=70.0"
+     * "🔍 Relay 1: 25.5 > 30 = False"
+     * "🔍 Relay 1: 70.0 > 80 = False"
+     * "🔍 Relay 1: False OR False = False"
+
+5. If relay doesn't trigger:
+   - Verify sensor values meet conditions
+   - Check if conditions are set correctly
+   - Verify logic (OR/AND) is what you expect
+   - Check backend logs for any errors
+
+📋 EXPECTED BEHAVIOR:
+
+- When ANY condition is TRUE (OR mode):
+  Relay should turn ON
+  
+- When ALL conditions are TRUE (AND mode):
+  Relay should turn ON
+
+- Frontend should show config summary in Auto Mode section
+- Backend logs should show detailed evaluation steps

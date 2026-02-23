@@ -1,0 +1,145 @@
+✅ FAN RELAY DUAL SENSOR - COMPLETE FIX v2
+
+PROBLEMS FIXED:
+
+1. ❌ Relay เปิดปิดเองใน MANUAL mode
+   → FIXED: relay_previous_state initialized to False instead of None
+   → FIXED: Added critical check "if mode != 'AUTO': continue" with explicit logging
+   → FIXED: Only MANUAL mode relays are excluded from evaluation entirely
+
+2. ❌ Fan dual sensor config ไม่ทำงาน
+   → FIXED: Backend relay_configs[1] now initialized with dual sensor format
+   → FIXED: POST /api/relay-configs properly detects and saves dual sensor format
+   → FIXED: evaluate_auto_mode() properly evaluates both conditions with OR/AND logic
+
+3. ✅ Other relays unchanged
+   → Pump (0), Lamp (2), Mist (3) use single sensor format (unchanged)
+
+🧪 COMPLETE TEST PROCEDURE:
+
+PHASE 1: Verify NO interference in MANUAL mode
+─────────────────────────────────────────────
+
+1. Open Dashboard: http://100.119.101.9:5174/
+2. Go to CONTROL PAGE
+3. For each relay (Pump, Lamp, Mist):
+   - Verify mode is MANUAL
+   - Click the relay button
+   - Should NOT turn on/off by itself
+   - Should ONLY respond to manual button clicks
+4. Open backend log:
+   tail -f /home/admin/PlatformIOProjects/SmartFarmMQTT-main/MyWeb/backend.log
+5. Verify backend does NOT show:
+   ❌ "🔍 Relay X: Mode=AUTO" (should show Mode=MANUAL)
+   ❌ "📡 Published MQTT" for manual mode relays
+
+PHASE 2: Test Fan dual sensor config
+─────────────────────────────────────
+
+1. Browser: Click AUTO button on Fan
+2. Browser console (F12): Should show
+   ✅ 📤 Backend: Relay 1 → AUTO (200)
+
+3. Click ⚙️ EDIT CONFIG on Fan
+4. Set:
+   - Sensor 1: Temperature > 12
+   - Sensor 2: (anything, e.g., hum > 30)
+   - Logic: OR
+
+5. Click ✅ SAVE
+6. Browser console: Should show
+   🌀 FAN CONFIG (Dual Sensor):
+   Logic: OR
+   Sensor 1: temp > 12
+   Sensor 2: hum > 30
+   ✅ Relay 1 config saved to backend
+
+7. Backend log: Should show
+   🔧 POST /api/relay-configs - Received data: {...target1: 12...}
+   🔧 AUTO Config Updated - Fan (Dual): (temp > 12) OR (hum > 30)
+   ✅ Config saved - relay_configs[1]: {...}
+
+PHASE 3: Verify Fan evaluation
+───────────────────────────────
+
+1. Open backend log (tail -f backend.log)
+2. When new sensor data arrives, you should see:
+
+   🔍 AUTO Evaluation Start - Modes: {0: 'MANUAL', 1: 'AUTO', 2: 'MANUAL', 3: 'MANUAL'}
+   🔍 Relay 0: Mode=MANUAL
+      → Skipped (Mode=MANUAL, not AUTO)
+   🔍 Relay 1: Mode=AUTO
+   🔍 Relay 1 DUAL Config: (temp > 12) OR (hum > 30)
+   🔍 Relay 1: Sensor1(temp)=27.0, Sensor2(hum)=38.5
+   🔍 Relay 1: 27.0 > 12 = True
+   🔍 Relay 1: 38.5 > 30 = True
+   🔍 Relay 1: True OR True = True
+   🔍 Relay 1: Previous=False, New=True
+   📡 Published MQTT: {"type": "RELAY", "index": 1, "value": true}
+   🤖 AUTO Mode: Fan 🌬️ → ON ✅
+
+3. Relay 2 & 3 should show:
+   🔍 Relay 2: Mode=MANUAL
+      → Skipped (Mode=MANUAL, not AUTO)
+   🔍 Relay 3: Mode=MANUAL
+      → Skipped (Mode=MANUAL, not AUTO)
+
+PHASE 4: Verify Fan turns ON when condition met
+────────────────────────────────────────────────
+
+Current sensor values:
+- temp = 27.0°C (your condition: temp > 12) ✓ WILL TRIGGER
+- hum = 38.5% (your condition: hum > 30) ✓ WILL TRIGGER
+
+With OR logic:
+- 27.0 > 12 = TRUE
+- 38.5 > 30 = TRUE
+- TRUE OR TRUE = TRUE
+→ Fan should turn ON ✓
+
+PHASE 5: Test AND logic
+───────────────────────
+
+1. Click ⚙️ EDIT CONFIG on Fan again
+2. Change to AND logic
+3. Save
+
+Result: Should still turn ON because both conditions are true
+- 27.0 > 12 = TRUE
+- 38.5 > 30 = TRUE
+- TRUE AND TRUE = TRUE
+
+🔍 DEBUGGING IF STILL NOT WORKING:
+
+Check #1: Backend log shows "Skipped" for relay 1?
+→ Fan mode is still MANUAL, not AUTO
+→ Click AUTO button again and check backend shows "Relay 1: Mode=AUTO"
+
+Check #2: Config not saved?
+→ Check browser console for POST errors
+→ Verify backend log shows "🔧 AUTO Config Updated"
+→ Verify "✅ Config saved" message
+
+Check #3: Conditions not matching?
+→ Backend log shows actual sensor values
+→ Verify your condition matches the values
+→ Example: if temp=27 and you set temp > 30, won't trigger
+
+Check #4: Relay not responding to MQTT?
+→ Backend publishes correctly: 📡 Published MQTT
+→ But relay doesn't change
+→ May be ESP32 issue, not software issue
+
+📝 EXPECTED BEHAVIOR AFTER FIX:
+
+✅ MANUAL mode relays: NO auto-evaluation, NO interference
+✅ AUTO mode relay: Evaluated on each sensor update
+✅ Fan dual sensor: Both conditions checked, combined with logic
+✅ State changes logged and published only when condition actually changes
+✅ No relay flickering or spurious state changes
+
+🎯 YOUR EXAMPLE TEST:
+- Fan: AUTO mode
+- Config: temp > 12 OR hum > 30
+- Current: temp=27, hum=38.5
+- Result: BOTH true → Fan should turn ON ✓✓✓
