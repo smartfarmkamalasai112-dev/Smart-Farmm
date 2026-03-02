@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { ChevronLeft, ChevronRight, Download } from 'lucide-react';
 
-export default function DataTablePage() {
+export default function DataTablePage({ espConnected = true }) {
   const [data, setData] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
@@ -17,44 +17,61 @@ export default function DataTablePage() {
   const [hourlyLoading, setHourlyLoading] = useState(false);
   const [weeklyLoading, setWeeklyLoading] = useState(false);
   const [monthlyLoading, setMonthlyLoading] = useState(false);
+  const [pageInput, setPageInput] = useState('');
+
+  const handlePageJump = (e) => {
+    e.preventDefault();
+    const num = parseInt(pageInput, 10);
+    if (!isNaN(num) && num >= 1 && num <= maxPages) {
+      setPage(num - 1);
+    }
+    setPageInput('');
+  };
 
   useEffect(() => {
+    if (!espConnected) {
+      setData([]); setTotal(0); setLoading(false);
+      return;
+    }
     fetchData();
     const interval = setInterval(fetchData, 60000); // Auto-refresh every 1 minute
     return () => clearInterval(interval);
-  }, [page, limit]);
+  }, [page, limit, espConnected]);
 
   // Fetch hourly data from dedicated endpoint whenever in daily mode
   useEffect(() => {
+    if (!espConnected) { setHourlyData([]); return; }
     if (filterMode === 'daily') {
       fetchHourlyData();
       const interval = setInterval(fetchHourlyData, 60000);
       return () => clearInterval(interval);
     }
-  }, [filterMode]);
+  }, [filterMode, espConnected]);
 
   // Fetch weekly data from dedicated endpoint whenever in weekly mode
   useEffect(() => {
+    if (!espConnected) { setWeeklyData([]); return; }
     if (filterMode === 'weekly') {
       fetchWeeklyData();
       const interval = setInterval(fetchWeeklyData, 60000);
       return () => clearInterval(interval);
     }
-  }, [filterMode]);
+  }, [filterMode, espConnected]);
 
   // Fetch monthly data from dedicated endpoint whenever in monthly mode
   useEffect(() => {
+    if (!espConnected) { setMonthlyData([]); return; }
     if (filterMode === 'monthly') {
       fetchMonthlyData();
       const interval = setInterval(fetchMonthlyData, 60000);
       return () => clearInterval(interval);
     }
-  }, [filterMode]);
+  }, [filterMode, espConnected]);
 
   const fetchHourlyData = async () => {
     try {
       setHourlyLoading(true);
-      const response = await fetch(`http://localhost:5000/api/backup-data/hourly`);
+      const response = await fetch(`http://${window.location.hostname}:5000/api/backup-data/hourly`);
       const result = await response.json();
       if (result.status === 'success') {
         // Keep only last 24 unique hours (rolling window: drop oldest when new hour arrives)
@@ -74,7 +91,7 @@ export default function DataTablePage() {
   const fetchWeeklyData = async () => {
     try {
       setWeeklyLoading(true);
-      const response = await fetch(`http://localhost:5000/api/backup-data/weekly`);
+      const response = await fetch(`http://${window.location.hostname}:5000/api/backup-data/weekly`);
       const result = await response.json();
       if (result.status === 'success') {
         const sorted = [...result.data].sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
@@ -94,7 +111,7 @@ export default function DataTablePage() {
       setLoading(true);
       setError(null);
       const response = await fetch(
-        `http://localhost:5000/api/backup-data?limit=${limit}&offset=${page * limit}`
+        `http://${window.location.hostname}:5000/api/backup-data?limit=${limit}&offset=${page * limit}`
       );
       const result = await response.json();
       
@@ -115,22 +132,40 @@ export default function DataTablePage() {
   const sensorData = data.filter(d => d.type === 'sensor');
   const relayData = data.filter(d => d.type === 'relay');
 
-  const handleExport = () => {
-    const csv = generateCSV();
-    const blob = new Blob([csv], { type: 'text/csv' });
-    const url = window.URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `farm-data-${new Date().toISOString().slice(0, 10)}.csv`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    window.URL.revokeObjectURL(url);
+  const handleExport = async () => {
+    try {
+      // Show loading feedback
+      const btn = document.querySelector('[style*="exportBtn"]');
+      if (btn) btn.textContent = 'กำลังดาวน์โหลด...';
+
+      // Fetch ALL data from backend (no limit, sorted DESC by default)
+      const response = await fetch(`http://${window.location.hostname}:5000/api/backup-data?limit=999999&offset=0`);
+      const result = await response.json();
+      
+      if (result.status === 'success' && result.data) {
+        const csv = generateCSV(result.data);
+        const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+        const url = window.URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `farm-data-${new Date().toISOString().slice(0, 10)}.csv`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        window.URL.revokeObjectURL(url);
+      }
+      
+      if (btn) btn.textContent = '✓ ดาวน์โหลด CSV';
+      setTimeout(() => { if (btn) btn.textContent = 'ดาวน์โหลด CSV'; }, 2000);
+    } catch (err) {
+      console.error('Export error:', err);
+      alert('เกิดข้อผิดพลาดในการดาวน์โหลด');
+    }
   };
 
-  const generateCSV = () => {
+  const generateCSV = (dataArray = data) => {
     let csv = 'Timestamp,Type,Data\n';
-    data.forEach(row => {
+    dataArray.forEach(row => {
       const dataStr = JSON.stringify(row.data).replace(/"/g, '""');
       csv += `${row.timestamp},${row.type},"${dataStr}"\n`;
     });
@@ -142,7 +177,7 @@ export default function DataTablePage() {
   const fetchMonthlyData = async () => {
     try {
       setMonthlyLoading(true);
-      const response = await fetch(`http://localhost:5000/api/backup-data/monthly`);
+      const response = await fetch(`http://${window.location.hostname}:5000/api/backup-data/monthly`);
       const result = await response.json();
       if (result.status === 'success') {
         const sorted = [...result.data].sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
@@ -159,10 +194,22 @@ export default function DataTablePage() {
 
   const maxPages = Math.ceil(total / limit);
 
+  // คำนวณช่วงห่างระหว่าง 2 timestamp
+  const getInterval = (rows, idx) => {
+    if (idx === 0) return null;
+    const prev = new Date(rows[idx - 1].timestamp);
+    const curr = new Date(rows[idx].timestamp);
+    const diffSec = Math.round((curr - prev) / 1000);
+    if (isNaN(diffSec) || diffSec < 0) return null;
+    if (diffSec < 60) return { label: `${diffSec}s`, real: diffSec > 30 };
+    if (diffSec < 3600) return { label: `${Math.round(diffSec / 60)}m`, real: true };
+    return { label: `${Math.round(diffSec / 3600)}h`, real: true };
+  };
+
   const styles = {
     container: {
-      padding: '20px',
-      maxWidth: '1400px',
+      padding: '6px',
+      maxWidth: '100%',
       margin: '0 auto',
       fontFamily: 'Arial, sans-serif'
     },
@@ -170,12 +217,12 @@ export default function DataTablePage() {
       display: 'flex',
       justifyContent: 'space-between',
       alignItems: 'center',
-      marginBottom: '20px',
+      marginBottom: '8px',
       borderBottom: '2px solid #e0e0e0',
-      paddingBottom: '15px'
+      paddingBottom: '6px'
     },
     title: {
-      fontSize: '24px',
+      fontSize: '16px',
       fontWeight: 'bold',
       margin: 0,
       color: '#333'
@@ -281,28 +328,37 @@ export default function DataTablePage() {
       backgroundColor: 'white',
       borderRadius: '8px',
       boxShadow: '0 2px 4px rgba(0,0,0,0.1)',
-      marginBottom: '20px'
+      marginBottom: '10px'
     },
     table: {
       width: '100%',
       borderCollapse: 'collapse',
-      fontSize: '14px'
+      fontSize: '11px',
+      tableLayout: 'auto'
     },
     tableHead: {
       backgroundColor: '#f5f5f5',
       borderBottom: '2px solid #ddd'
     },
     tableHeadCell: {
-      padding: '12px 16px',
+      padding: '5px 4px',
       textAlign: 'left',
       fontWeight: 'bold',
-      color: '#333'
+      color: '#333',
+      fontSize: '10px',
+      lineHeight: '1.3',
+      whiteSpace: 'normal',
+      minWidth: '54px'
     },
     tableHeadCellCenter: {
-      padding: '12px 16px',
+      padding: '5px 4px',
       textAlign: 'center',
       fontWeight: 'bold',
-      color: '#333'
+      color: '#333',
+      fontSize: '10px',
+      lineHeight: '1.3',
+      whiteSpace: 'normal',
+      minWidth: '54px'
     },
     tableRow: {
       borderBottom: '1px solid #eee'
@@ -311,10 +367,10 @@ export default function DataTablePage() {
       backgroundColor: '#fafafa'
     },
     tableCell: {
-      padding: '12px 16px'
+      padding: '5px 4px'
     },
     tableCellCenter: {
-      padding: '12px 16px',
+      padding: '5px 4px',
       textAlign: 'center'
     },
     paginationContainer: {
@@ -350,7 +406,68 @@ export default function DataTablePage() {
     paginationBtnDisabled: {
       backgroundColor: '#ccc',
       cursor: 'not-allowed'
+    },
+    pageJumpForm: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: '6px'
+    },
+    pageJumpLabel: {
+      fontSize: '14px',
+      color: '#666'
+    },
+    pageJumpInput: {
+      width: '60px',
+      padding: '7px 8px',
+      border: '1px solid #ccc',
+      borderRadius: '4px',
+      fontSize: '14px',
+      textAlign: 'center',
+      outline: 'none'
+    },
+    pageJumpBtn: {
+      padding: '7px 12px',
+      backgroundColor: '#2196F3',
+      color: 'white',
+      border: 'none',
+      borderRadius: '4px',
+      cursor: 'pointer',
+      fontSize: '14px',
+      fontWeight: 'bold'
     }
+  };
+
+  // ── Relay columns (fixed order, ตรงกับหน้าควบคุม) ─────────────────────────
+  const RELAY_COLS = [
+    { key: 'Fan',         label: 'พัดลม',         group: 'env' },
+    { key: 'Mist',        label: 'พ่นหมอก',       group: 'env' },
+    { key: 'EvapPump',    label: 'ปั้มEvap',       group: 'env' },
+    { key: 'Lamp',        label: 'ไฟส่องสว่าง',    group: 'env' },
+    { key: 'Pump',        label: 'ปั้มแปลง1',      group: 'z1'  },
+    { key: 'V1-P1',       label: 'วาล์ว1 แปลง1',   group: 'z1'  },
+    { key: 'V2-P1',       label: 'วาล์ว2 แปลง1',   group: 'z1'  },
+    { key: 'V3-P1',       label: 'วาล์ว3 แปลง1',   group: 'z1'  },
+    { key: 'Plot Pump 2', label: 'ปั้มแปลง2',      group: 'z2'  },
+    { key: 'V1-P2',       label: 'วาล์ว1 แปลง2',   group: 'z2'  },
+    { key: 'V2-P2',       label: 'วาล์ว2 แปลง2',   group: 'z2'  },
+    { key: 'V3-P2',       label: 'วาล์ว3 แปลง2',   group: 'z2'  },
+  ];
+
+  const renderRelayCell = (data, key, isFresh) => {
+    // Show – when row is stale (not fresh from real ESP data)
+    if (!isFresh) {
+      return <td key={key} style={styles.tableCellCenter}><span style={{ color: '#bbb', fontStyle: 'italic', fontWeight: 'normal' }}>NaN</span></td>;
+    }
+    const info = data?.[key];
+    if (!info) return <td key={key} style={styles.tableCellCenter}><span style={{color:'#bbb'}}>-</span></td>;
+    return (
+      <td key={key} style={styles.tableCellCenter} title={`${key}: ${info.state} (${info.mode})`}>
+        <div style={{ fontSize: '12px', fontWeight: 'bold' }}>
+          <div style={{ color: info.state === 'ON' ? '#388e3c' : '#d32f2f' }}>{info.state}</div>
+          <div style={{ color: info.mode === 'AUTO' ? '#1976d2' : '#f57f17', fontSize: '11px', marginTop: '2px' }}>{info.mode}</div>
+        </div>
+      </td>
+    );
   };
 
   return (
@@ -367,6 +484,17 @@ export default function DataTablePage() {
           ดาวน์โหลด CSV
         </button>
       </div>
+
+      {/* Banner: ESP32 ยังไม่ได้เชื่อมต่อ */}
+      {!espConnected && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: '10px', background: '#fff8e1', border: '1px solid #ffca28', borderRadius: '8px', padding: '10px 16px', marginBottom: '12px', color: '#795548' }}>
+          <span style={{ fontSize: '20px' }}>⚠️</span>
+          <div>
+            <div style={{ fontWeight: 'bold', fontSize: '13px' }}>ESP32 ยังไม่ได้เชื่อมต่อ</div>
+            <div style={{ fontSize: '12px', marginTop: '2px' }}>ข้อมูลที่แสดงอยู่เป็น <strong>ข้อมูลย้อนหลัง</strong> ที่บันทึกไว้ใน database — ระบบจะไม่รับข้อมูลใหม่จนกว่า ESP32 จะเชื่อมต่อ</div>
+          </div>
+        </div>
+      )}
 
       {error && (
         <div style={styles.errorBox}>
@@ -469,50 +597,85 @@ export default function DataTablePage() {
       {!(loading || (filterMode === 'daily' && hourlyLoading) || (filterMode === 'weekly' && weeklyLoading) || (filterMode === 'monthly' && monthlyLoading)) && activeTab === 'sensor' && (
         <div style={styles.tableWrapper}>
           {filterMode === 'daily' && hourlyData.filter(d => d.type === 'sensor').length === 0 && (
-            <div style={{ padding: '20px', textAlign: 'center', color: '#999' }}>
-              ไม่มีข้อมูลเซนเซอร์ใน 24 ชั่วโมงที่ผ่านมา
+            <div style={{ padding: '30px', textAlign: 'center', color: '#999', fontSize: '20px', fontWeight: 'bold', letterSpacing: '4px' }}>
+              {!espConnected ? '– – – – –' : 'ไม่มีข้อมูลเซนเซอร์ใน 24 ชั่วโมงที่ผ่านมา'}
             </div>
           )}
           {filterMode === 'weekly' && weeklyData.filter(d => d.type === 'sensor').length === 0 && (
-            <div style={{ padding: '20px', textAlign: 'center', color: '#999' }}>
-              ไม่มีข้อมูลเซนเซอร์สำหรับ 7 วันนี้
+            <div style={{ padding: '30px', textAlign: 'center', color: '#999', fontSize: '20px', fontWeight: 'bold', letterSpacing: '4px' }}>
+              {!espConnected ? '– – – – –' : 'ไม่มีข้อมูลเซนเซอร์สำหรับ 7 วันนี้'}
             </div>
           )}          {filterMode === 'monthly' && monthlyData.filter(d => d.type === 'sensor').length === 0 && (
-            <div style={{ padding: '20px', textAlign: 'center', color: '#999' }}>
-              ไม่มีข้อมูลเซนเซอร์สำหรับเดือนนี้
+            <div style={{ padding: '30px', textAlign: 'center', color: '#999', fontSize: '20px', fontWeight: 'bold', letterSpacing: '4px' }}>
+              {!espConnected ? '– – – – –' : 'ไม่มีข้อมูลเซนเซอร์สำหรับเดือนนี้'}
             </div>
           )}          {filterMode === 'all' && sensorData.length === 0 && (
-            <div style={{ padding: '20px', textAlign: 'center', color: '#999' }}>
-              ไม่มีข้อมูลเซนเซอร์
+            <div style={{ padding: '30px', textAlign: 'center', color: '#999', fontSize: '20px', fontWeight: 'bold', letterSpacing: '4px' }}>
+              {!espConnected ? '– – – – –' : 'ไม่มีข้อมูลเซนเซอร์'}
             </div>
           )}
           {(filterMode === 'all' ? sensorData.length > 0 : filterMode === 'daily' ? hourlyData.filter(d => d.type === 'sensor').length > 0 : weeklyData.filter(d => d.type === 'sensor').length > 0) && (
             <table style={styles.table}>
               <thead style={styles.tableHead}>
+                {/* แถวที่ 1 — กลุ่มโซน */}
                 <tr>
-                  <th style={styles.tableHeadCell}>เวลา {filterMode === 'daily' ? '(รายชั่วโมง)' : filterMode === 'weekly' ? '(รายวัน)' : ''}</th>
-                  <th style={styles.tableHeadCellCenter}>อุณหภูมิ (°C)</th>
-                  <th style={styles.tableHeadCellCenter}>ความชื้น (%)</th>
-                  {/* Soil 1 Expanded */}
-                  <th style={styles.tableHeadCellCenter}>ดิน 1 (%)</th>
-                  <th style={styles.tableHeadCellCenter}>ดิน 1 (pH)</th>
-                  <th style={styles.tableHeadCellCenter}>ดิน 1 (N)</th>
-                  <th style={styles.tableHeadCellCenter}>ดิน 1 (P)</th>
-                  <th style={styles.tableHeadCellCenter}>ดิน 1 (K)</th>
-                  <th style={styles.tableHeadCellCenter}>ดิน 2 (%)</th>
-                  {/* ⭐ NEW: Node 3 Columns */}
-                  <th style={styles.tableHeadCellCenter}>S1 (Node 3)</th>
-                  <th style={styles.tableHeadCellCenter}>S1 pH (Node 3)</th>
-                  <th style={styles.tableHeadCellCenter}>S2 (Node 3)</th>
-                  <th style={styles.tableHeadCellCenter}>S3 (Node 3)</th>
-                  <th style={styles.tableHeadCellCenter}>S4 (Node 3)</th>
-                  
-                  <th style={styles.tableHeadCellCenter}>แสง (lux)</th>
-                  <th style={styles.tableHeadCellCenter}>CO2 (ppm)</th>
+                  <th rowSpan={2} style={{...styles.tableHeadCell, verticalAlign: 'middle', borderRight: '2px solid #bbb'}}>
+                    เวลา {filterMode === 'daily' ? '(รายชั่วโมง)' : filterMode === 'weekly' ? '(รายวัน)' : ''}
+                  </th>
+                  <th rowSpan={2} style={{...styles.tableHeadCellCenter, verticalAlign: 'middle', borderRight: '2px solid #bbb', background: '#f5f5f5', minWidth: '60px'}}>
+                    ⏱ ช่วงห่าง
+                  </th>
+                  <th colSpan={4} style={{...styles.tableHeadCellCenter, background: '#e3f2fd', color: '#1565c0', borderBottom: '1px solid #90caf9', borderRight: '2px solid #90caf9'}}>
+                    🌡️ สภาพแวดล้อม
+                  </th>
+                  <th colSpan={7} style={{...styles.tableHeadCellCenter, background: '#e8f5e9', color: '#2e7d32', borderBottom: '1px solid #a5d6a7', borderRight: '2px solid #a5d6a7'}}>
+                    🌱 แปลง 1
+                  </th>
+                  <th colSpan={7} style={{...styles.tableHeadCellCenter, background: '#f1f8e9', color: '#558b2f', borderBottom: '1px solid #c5e1a5'}}>
+                    🌿 แปลง 2
+                  </th>
+                </tr>
+                {/* แถวที่ 2 — ชื่อคอลัมน์ */}
+                <tr>
+                  {/* สภาพแวดล้อม */}
+                  <th style={{...styles.tableHeadCellCenter, borderRight: '1px solid #90caf9'}}>อุณหภูมิ (°C)</th>
+                  <th style={{...styles.tableHeadCellCenter, borderRight: '1px solid #90caf9'}}>ความชื้น (%)</th>
+                  <th style={{...styles.tableHeadCellCenter, borderRight: '1px solid #90caf9'}}>แสง (lux)</th>
+                  <th style={{...styles.tableHeadCellCenter, borderRight: '2px solid #90caf9'}}>CO2 (ppm)</th>
+                  {/* แปลง 1 */}
+                  <th style={{...styles.tableHeadCellCenter, borderRight: '1px solid #a5d6a7'}}>ดิน 1 (%)</th>
+                  <th style={{...styles.tableHeadCellCenter, borderRight: '1px solid #a5d6a7'}}>ดิน 2 (%)</th>
+                  <th style={{...styles.tableHeadCellCenter, borderRight: '1px solid #a5d6a7'}}>ดิน 3 (%)</th>
+                  <th style={{...styles.tableHeadCellCenter, borderRight: '1px solid #a5d6a7'}}>pH</th>
+                  <th style={{...styles.tableHeadCellCenter, borderRight: '1px solid #a5d6a7'}}>N</th>
+                  <th style={{...styles.tableHeadCellCenter, borderRight: '1px solid #a5d6a7'}}>P</th>
+                  <th style={{...styles.tableHeadCellCenter, borderRight: '2px solid #a5d6a7'}}>K</th>
+                  {/* แปลง 2 */}
+                  <th style={{...styles.tableHeadCellCenter, borderRight: '1px solid #c5e1a5'}}>ดิน 1 (%)</th>
+                  <th style={{...styles.tableHeadCellCenter, borderRight: '1px solid #c5e1a5'}}>ดิน 2 (%)</th>
+                  <th style={{...styles.tableHeadCellCenter, borderRight: '1px solid #c5e1a5'}}>ดิน 3 (%)</th>
+                  <th style={{...styles.tableHeadCellCenter, borderRight: '1px solid #c5e1a5'}}>pH</th>
+                  <th style={{...styles.tableHeadCellCenter, borderRight: '1px solid #c5e1a5'}}>N</th>
+                  <th style={{...styles.tableHeadCellCenter, borderRight: '1px solid #c5e1a5'}}>P</th>
+                  <th style={styles.tableHeadCellCenter}>K</th>
                 </tr>
               </thead>
               <tbody style={styles.tableBody}>
-                {(filterMode === 'all' ? sensorData : filterMode === 'daily' ? hourlyData.filter(d => d.type === 'sensor') : filterMode === 'weekly' ? weeklyData.filter(d => d.type === 'sensor') : monthlyData.filter(d => d.type === 'sensor')).map((row, idx) => (
+                {(() => {
+                  const rows = filterMode === 'all' ? sensorData : filterMode === 'daily' ? hourlyData.filter(d => d.type === 'sensor') : filterMode === 'weekly' ? weeklyData.filter(d => d.type === 'sensor') : monthlyData.filter(d => d.type === 'sensor');
+                  return rows.map((row, idx) => {
+                  const gap = getInterval(rows, idx);
+                  // 'all' mode: gap-based detection (5s duplicates = stale)
+                  // hourly/weekly/monthly: use _fresh flag from API ([FRESH] marker in backup file)
+                  // row._fresh === undefined (old data) → treat as real; false → stale → NaN
+                  const isReal = filterMode === 'all'
+                    ? (gap === null || gap.real)
+                    : row._fresh !== false;
+                  const nanStyle = { color: '#bbb', fontStyle: 'italic', fontWeight: 'normal' };
+                  const v = (val, decimals = 1) => isReal
+                    ? (val != null ? val.toFixed(decimals) : '-')
+                    : <span style={nanStyle}>NaN</span>;
+                  return (
                   <tr 
                     key={idx} 
                     style={{
@@ -521,59 +684,84 @@ export default function DataTablePage() {
                     }}
                   >
                     <td style={styles.tableCell}>{row.timestamp}</td>
+                    <td style={{...styles.tableCellCenter, borderRight: '2px solid #bbb'}}>
+                      {gap === null ? (
+                        <span style={{ color: '#aaa', fontSize: '11px' }}>–</span>
+                      ) : (
+                        <span style={{
+                          display: 'inline-block',
+                          padding: '2px 6px',
+                          borderRadius: '10px',
+                          fontSize: '11px',
+                          fontWeight: 'bold',
+                          background: gap.real ? '#e8f5e9' : '#ffebee',
+                          color: gap.real ? '#2e7d32' : '#c62828'
+                        }}>
+                          {gap.real ? '✅' : '⚠️'} {gap.label}
+                        </span>
+                      )}
+                    </td>
                     <td style={{...styles.tableCellCenter, color: '#d32f2f', fontWeight: 'bold'}}>
-                      {row.data.temp?.toFixed(1) || '-'}
+                      {v(row.data.temp, 1)}
                     </td>
                     <td style={{...styles.tableCellCenter, color: '#1976d2', fontWeight: 'bold'}}>
-                      {row.data.humidity?.toFixed(1) || '-'}
+                      {v(row.data.humidity, 1)}
                     </td>
-                    {/* Soil 1 Expanded */}
-                    <td style={{...styles.tableCellCenter, color: '#388e3c', fontWeight: 'bold'}}>
-                      {row.data.soil_1?.toFixed(1) || '-'}
-                    </td>
-                    <td style={{...styles.tableCellCenter, color: '#388e3c', fontWeight: 'bold', fontSize: '12px'}}>
-                      {row.data.soil_1_ph?.toFixed(1) || '-'}
-                    </td>
-                    <td style={{...styles.tableCellCenter, color: '#388e3c', fontWeight: 'bold', fontSize: '12px'}}>
-                      {row.data.soil_1_n?.toFixed(0) || '-'} mg/kg
-                    </td>
-                    <td style={{...styles.tableCellCenter, color: '#388e3c', fontWeight: 'bold', fontSize: '12px'}}>
-                      {row.data.soil_1_p?.toFixed(0) || '-'} mg/kg
-                    </td>
-                    <td style={{...styles.tableCellCenter, color: '#388e3c', fontWeight: 'bold', fontSize: '12px'}}>
-                      {row.data.soil_1_k?.toFixed(0) || '-'} mg/kg
-                    </td>
-                    
-                    <td style={{...styles.tableCellCenter, color: '#00796b', fontWeight: 'bold'}}>
-                      {row.data.soil_2?.toFixed(1) || '-'}
-                    </td>
-                    
-                    {/* ⭐ NEW: Node 3 Data Cells */}
-                    <td style={{...styles.tableCellCenter, color: '#558b2f', fontWeight: 'bold'}}>
-                      {row.data.node3_s1_hum?.toFixed(1) || '-'}
-                    </td>
-                    <td style={{...styles.tableCellCenter, color: '#689f38', fontWeight: 'bold'}}>
-                       {/* This is pH, currently 0 */}
-                      -
-                    </td>
-                    <td style={{...styles.tableCellCenter, color: '#689f38', fontWeight: 'bold'}}>
-                      {row.data.node3_s2_hum?.toFixed(1) || '-'}
-                    </td>
-                    <td style={{...styles.tableCellCenter, color: '#7cb342', fontWeight: 'bold'}}>
-                      {row.data.node3_s3_hum?.toFixed(1) || '-'}
-                    </td>
-                    <td style={{...styles.tableCellCenter, color: '#8bc34a', fontWeight: 'bold'}}>
-                      {row.data.node3_s4_hum?.toFixed(1) || '-'}
-                    </td>
-                    
                     <td style={{...styles.tableCellCenter, color: '#f57f17', fontWeight: 'bold'}}>
-                      {row.data.lux?.toFixed(0) || '-'}
+                      {v(row.data.lux, 0)}
                     </td>
                     <td style={{...styles.tableCellCenter, color: '#7b1fa2', fontWeight: 'bold'}}>
-                      {row.data.co2?.toFixed(0) || '-'}
+                      {v(row.data.co2, 0)}
+                    </td>
+                    {/* แปลง 1 — ความชื้นดิน 1, 2, 3 */}
+                    <td style={{...styles.tableCellCenter, color: '#388e3c', fontWeight: 'bold'}}>
+                      {v(row.data.soil_1, 1)}
+                    </td>
+                    <td style={{...styles.tableCellCenter, color: '#00796b', fontWeight: 'bold'}}>
+                      {v(row.data.soil_2, 1)}
+                    </td>
+                    <td style={{...styles.tableCellCenter, color: '#689f38', fontWeight: 'bold'}}>
+                      {v(row.data.node3_s2_hum, 1)}
+                    </td>
+                    {/* แปลง 1 — pH, N, P, K */}
+                    <td style={{...styles.tableCellCenter, color: '#388e3c', fontWeight: 'bold'}}>
+                      {v(row.data.soil_1_ph, 1)}
+                    </td>
+                    <td style={{...styles.tableCellCenter, color: '#388e3c', fontWeight: 'bold'}}>
+                      {v(row.data.soil_1_n, 0)}
+                    </td>
+                    <td style={{...styles.tableCellCenter, color: '#388e3c', fontWeight: 'bold'}}>
+                      {v(row.data.soil_1_p, 0)}
+                    </td>
+                    <td style={{...styles.tableCellCenter, color: '#388e3c', fontWeight: 'bold'}}>
+                      {v(row.data.soil_1_k, 0)}
+                    </td>
+                    {/* แปลง 2 */}
+                    <td style={{...styles.tableCellCenter, color: '#558b2f', fontWeight: 'bold'}}>
+                      {v(row.data.node3_s1_hum, 1)}
+                    </td>
+                    <td style={{...styles.tableCellCenter, color: '#7cb342', fontWeight: 'bold'}}>
+                      {v(row.data.node3_s3_hum, 1)}
+                    </td>
+                    <td style={{...styles.tableCellCenter, color: '#8bc34a', fontWeight: 'bold'}}>
+                      {v(row.data.node3_s4_hum, 1)}
+                    </td>
+                    <td style={{...styles.tableCellCenter, color: '#558b2f', fontWeight: 'bold', fontSize: '12px'}}>
+                      {v(row.data.node3_s1_ph, 1)}
+                    </td>
+                    <td style={{...styles.tableCellCenter, color: '#558b2f', fontWeight: 'bold', fontSize: '12px'}}>
+                      {v(row.data.node3_s1_n, 0)}
+                    </td>
+                    <td style={{...styles.tableCellCenter, color: '#558b2f', fontWeight: 'bold', fontSize: '12px'}}>
+                      {v(row.data.node3_s1_p, 0)}
+                    </td>
+                    <td style={{...styles.tableCellCenter, color: '#558b2f', fontWeight: 'bold', fontSize: '12px'}}>
+                      {v(row.data.node3_s1_k, 0)}
                     </td>
                   </tr>
-                ))}
+                  );
+                  });
+                })()}
               </tbody>
             </table>
           )}
@@ -584,66 +772,70 @@ export default function DataTablePage() {
       {!(loading || (filterMode === 'daily' && hourlyLoading) || (filterMode === 'weekly' && weeklyLoading) || (filterMode === 'monthly' && monthlyLoading)) && activeTab === 'relay' && (
         <div style={styles.tableWrapper}>
           {filterMode === 'daily' && hourlyData.filter(d => d.type === 'relay').length === 0 && (
-            <div style={{ padding: '20px', textAlign: 'center', color: '#999' }}>
-              ไม่มีข้อมูลรีเลย์ใน 24 ชั่วโมงที่ผ่านมา
+            <div style={{ padding: '30px', textAlign: 'center', color: '#999', fontSize: '20px', fontWeight: 'bold', letterSpacing: '4px' }}>
+              {!espConnected ? '– – – – –' : 'ไม่มีข้อมูลรีเลย์ใน 24 ชั่วโมงที่ผ่านมา'}
             </div>
           )}
           {filterMode === 'weekly' && weeklyData.filter(d => d.type === 'relay').length === 0 && (
-            <div style={{ padding: '20px', textAlign: 'center', color: '#999' }}>
-              ไม่มีข้อมูลรีเลย์สำหรับ 7 วันนี้
+            <div style={{ padding: '30px', textAlign: 'center', color: '#999', fontSize: '20px', fontWeight: 'bold', letterSpacing: '4px' }}>
+              {!espConnected ? '– – – – –' : 'ไม่มีข้อมูลรีเลย์สำหรับ 7 วันนี้'}
             </div>
           )}
           {filterMode === 'monthly' && monthlyData.filter(d => d.type === 'relay').length === 0 && (
-            <div style={{ padding: '20px', textAlign: 'center', color: '#999' }}>
-              ไม่มีข้อมูลรีเลย์สำหรับเดือนนี้
+            <div style={{ padding: '30px', textAlign: 'center', color: '#999', fontSize: '20px', fontWeight: 'bold', letterSpacing: '4px' }}>
+              {!espConnected ? '– – – – –' : 'ไม่มีข้อมูลรีเลย์สำหรับเดือนนี้'}
             </div>
           )}
           {filterMode === 'all' && relayData.length === 0 && (
-            <div style={{ padding: '20px', textAlign: 'center', color: '#999' }}>
-              ไม่มีข้อมูลรีเลย์
+            <div style={{ padding: '30px', textAlign: 'center', color: '#999', fontSize: '20px', fontWeight: 'bold', letterSpacing: '4px' }}>
+              {!espConnected ? '– – – – –' : 'ไม่มีข้อมูลรีเลย์'}
             </div>
           )}
           {(filterMode === 'all' ? relayData.length > 0 : filterMode === 'daily' ? hourlyData.filter(d => d.type === 'relay').length > 0 : filterMode === 'weekly' ? weeklyData.filter(d => d.type === 'relay').length > 0 : monthlyData.filter(d => d.type === 'relay').length > 0) && (
             <table style={styles.table}>
               <thead style={styles.tableHead}>
+                {/* แถวที่ 1 — กลุ่มโซน */}
                 <tr>
-                  <th style={styles.tableHeadCell}>เวลา {filterMode === 'daily' ? '(รายชั่วโมง)' : filterMode === 'weekly' ? '(รายวัน)' : filterMode === 'monthly' ? '(รายสัปดาห์)' : ''}</th>
-                  {(filterMode === 'all' ? relayData : filterMode === 'daily' ? hourlyData.filter(d => d.type === 'relay') : filterMode === 'weekly' ? weeklyData.filter(d => d.type === 'relay') : monthlyData.filter(d => d.type === 'relay')).length > 0 && 
-                    Object.keys((filterMode === 'all' ? relayData[0] : filterMode === 'daily' ? hourlyData.filter(d => d.type === 'relay')[0] : filterMode === 'weekly' ? weeklyData.filter(d => d.type === 'relay')[0] : monthlyData.filter(d => d.type === 'relay')[0]).data).map(relayName => (
-                      <th key={relayName} style={styles.tableHeadCellCenter} title={relayName}>
-                        {relayName}
+                  <th rowSpan={2} style={{...styles.tableHeadCell, verticalAlign: 'middle', borderRight: '2px solid #bbb'}}>
+                    เวลา {filterMode === 'daily' ? '(รายชั่วโมง)' : filterMode === 'weekly' ? '(รายวัน)' : filterMode === 'monthly' ? '(รายสัปดาห์)' : ''}
+                  </th>
+                  <th colSpan={4} style={{...styles.tableHeadCellCenter, background: '#e3f2fd', color: '#1565c0', borderBottom: '1px solid #90caf9', borderRight: '2px solid #90caf9'}}>
+                    🌡️ สภาพแวดล้อม
+                  </th>
+                  <th colSpan={4} style={{...styles.tableHeadCellCenter, background: '#e8f5e9', color: '#2e7d32', borderBottom: '1px solid #a5d6a7', borderRight: '2px solid #a5d6a7'}}>
+                    🌱 แปลง 1
+                  </th>
+                  <th colSpan={4} style={{...styles.tableHeadCellCenter, background: '#f1f8e9', color: '#558b2f', borderBottom: '1px solid #c5e1a5'}}>
+                    🌿 แปลง 2
+                  </th>
+                </tr>
+                {/* แถวที่ 2 — ชื่อรีเลย์ */}
+                <tr>
+                  {RELAY_COLS.map((col, i) => {
+                    const bgMap = { env: '#e3f2fd', z1: '#e8f5e9', z2: '#f1f8e9' };
+                    const borderRight = (i === 3 || i === 7) ? '2px solid #bbb' : '1px solid #ddd';
+                    return (
+                      <th key={col.key} style={{...styles.tableHeadCellCenter, background: bgMap[col.group], borderRight, fontSize: '10px'}}>
+                        {col.label}
                       </th>
-                    ))}
+                    );
+                  })}
                 </tr>
               </thead>
               <tbody style={styles.tableBody}>
-                {(filterMode === 'all' ? relayData : filterMode === 'daily' ? hourlyData.filter(d => d.type === 'relay') : filterMode === 'weekly' ? weeklyData.filter(d => d.type === 'relay') : monthlyData.filter(d => d.type === 'relay')).map((row, idx) => (
-                  <tr 
+                {(filterMode === 'all' ? relayData : filterMode === 'daily' ? hourlyData.filter(d => d.type === 'relay') : filterMode === 'weekly' ? weeklyData.filter(d => d.type === 'relay') : monthlyData.filter(d => d.type === 'relay')).map((row, idx) => {
+                  // Same _fresh logic as sensor rows: undefined = old data = treat as real
+                  const isFresh = row._fresh !== false;
+                  return (
+                  <tr
                     key={idx}
-                    style={{
-                      ...styles.tableRow,
-                      ...(idx % 2 === 0 ? {} : styles.tableRowAlt)
-                    }}
+                    style={{...styles.tableRow, ...(idx % 2 === 0 ? {} : styles.tableRowAlt)}}
                   >
-                    <td style={styles.tableCell}>{row.timestamp}</td>
-                    {Object.entries(row.data).map(([relayName, relayInfo]) => (
-                      <td 
-                        key={relayName} 
-                        style={styles.tableCellCenter}
-                        title={`${relayName}: ${relayInfo.state} (${relayInfo.mode})`}
-                      >
-                        <div style={{ fontSize: '12px', fontWeight: 'bold' }}>
-                          <div style={{color: relayInfo.state === 'ON' ? '#d32f2f' : '#388e3c'}}>
-                            {relayInfo.state}
-                          </div>
-                          <div style={{color: relayInfo.mode === 'AUTO' ? '#1976d2' : '#f57f17', fontSize: '11px', marginTop: '2px'}}>
-                            {relayInfo.mode}
-                          </div>
-                        </div>
-                      </td>
-                    ))}
+                    <td style={{...styles.tableCell, borderRight: '2px solid #bbb'}}>{row.timestamp}</td>
+                    {RELAY_COLS.map(col => renderRelayCell(row.data, col.key, isFresh))}
                   </tr>
-                ))}
+                  );
+                })}
               </tbody>
             </table>
           )}
@@ -656,6 +848,19 @@ export default function DataTablePage() {
           <div style={styles.paginationInfo}>
             หน้า {page + 1} จาก {maxPages} (ทั้งหมด {total} รายการ)
           </div>
+          <form onSubmit={handlePageJump} style={styles.pageJumpForm}>
+            <span style={styles.pageJumpLabel}>ไปหน้า</span>
+            <input
+              type="number"
+              min={1}
+              max={maxPages}
+              value={pageInput}
+              onChange={(e) => setPageInput(e.target.value)}
+              placeholder="#"
+              style={styles.pageJumpInput}
+            />
+            <button type="submit" style={styles.pageJumpBtn}>ไป</button>
+          </form>
           <div style={styles.paginationButtons}>
             <button
               onClick={() => setPage(Math.max(0, page - 1))}

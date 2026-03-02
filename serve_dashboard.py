@@ -98,6 +98,7 @@ if __name__ == '__main__':
     print(f"Serving from: {DIST_DIR}")
     print(f"Backend proxy: {BACKEND_URL}")
     
+    socketserver.TCPServer.allow_reuse_address = True
     with socketserver.TCPServer(("0.0.0.0", PORT), DashboardHandler) as httpd:
         print(f"✓ Dashboard available at:")
         print(f"  - http://127.0.0.1:{PORT}")

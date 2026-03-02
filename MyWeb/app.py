@@ -44,7 +44,7 @@ import sqlite3
 import threading
 import time
 import copy
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
 import logging
 import traceback
@@ -153,18 +153,10 @@ relay_configs = {
     3: {'target': 60.0, 'condition': '<', 'param': 'hum'},  # Relay 3 - Mist (air humidity)
     4: {'target': 35.0, 'condition': '<', 'param': 'soil_hum'},  # Relay 4 - Plot Pump 2
     5: {'target': 35.0, 'condition': '<', 'param': 'soil_hum'},  # Relay 5 - EvapPump
-    6: {
-        'target1': 28.0, 'condition1': '>', 'param1': 'temp',
-        'target2': 75.0, 'condition2': '>', 'param2': 'hum',
-        'logic': 'OR'
-    },  # Relay 6 - Valve1 P1: Dual sensor
+    6: {'target': 50.0, 'condition': '<', 'param': 'soil_hum'},  # Relay 6 - Valve1 P1: Single sensor
     7: {'target': 50.0, 'condition': '<', 'param': 'soil_hum'},  # Relay 7 - Valve2 P1 (soil humidity)
     8: {'target': 50.0, 'condition': '<', 'param': 'soil_hum'},  # Relay 8 - Valve3 P1
-    9: {
-        'target1': 28.0, 'condition1': '>', 'param1': 'temp',
-        'target2': 75.0, 'condition2': '>', 'param2': 'hum',
-        'logic': 'OR'
-    },  # Relay 9 - Valve1 P2: Dual sensor
+    9: {'target': 50.0, 'condition': '<', 'param': 'soil_hum'},  # Relay 9 - Valve1 P2: Single sensor
     10: {'target': 150.0, 'condition': '<', 'param': 'lux'},  # Relay 10 - Valve2 P2
     11: {'target': 50.0, 'condition': '<', 'param': 'soil_hum'}  # Relay 11 - Valve3 P2 (FIXED: condition < not >)
 }
@@ -205,33 +197,78 @@ RELAY_TURN_ON_DELAY_SECONDS = 0  # Binary: Turn ON immediately when condition is
 RELAY_TURN_OFF_DELAY_SECONDS = 0  # Binary: Turn OFF immediately when condition is not met
 
 # ⭐ TARGETED ANTI-CHATTER HOLD TIMES (seconds)
-# Apply ONLY to problematic relays requested by user:
-# 3 = Mist, 7 = Valve2 P1, 8 = Valve3 P1, 11 = Valve3 P2
-# Other relays remain unchanged (0 seconds).
+# Valve relays (6-11) now use PULSE MODE instead of hold time — set to 0
 RELAY_MIN_HOLD_SECONDS = {
     3: 25,   # Mist: avoid short pulses
-    7: 35,   # Valve2 P1: prevent frequent oscillation
-    8: 45,   # Valve3 P1: strongest anti-chatter
-    11: 45   # Valve3 P2: strongest anti-chatter
 }
 
 def get_relay_min_hold_seconds(relay_index):
     """Return per-relay minimum hold time before allowing next toggle."""
     return int(RELAY_MIN_HOLD_SECONDS.get(relay_index, 0))
 
+# ===== PULSE MODE FOR VALVE RELAYS (6-11) =====
+# Valve relays run in 10s ON / 10s OFF cycles while sensor condition is active
+# Immediately OFF when sensor crosses threshold
+PULSE_RELAYS = {6, 7, 8, 9, 10, 11}
+PULSE_ON_SECONDS  = 10   # เปิด 10 วินาที
+PULSE_OFF_SECONDS = 10   # ปิด 10 วินาที
+
+# phase: 'IDLE' | 'ON' | 'OFF'
+pulse_state = {i: {'phase': 'IDLE', 'phase_start': 0.0} for i in PULSE_RELAYS}
+
+def evaluate_pulse(relay_index, should_turn_on, current_relay_state):
+    """
+    State machine for pulse-mode valve relays.
+    Returns the actual desired relay state after applying pulse timing.
+    """
+    global pulse_state
+    ps = pulse_state[relay_index]
+    now = time.time()
+
+    if not should_turn_on:
+        # Sensor condition no longer met → OFF immediately, reset cycle
+        pulse_state[relay_index] = {'phase': 'IDLE', 'phase_start': 0.0}
+        return False
+
+    # Sensor condition still active → manage ON/OFF cycle
+    phase   = ps['phase']
+    elapsed = now - ps['phase_start']
+
+    if phase == 'IDLE':
+        # First trigger → start ON phase
+        pulse_state[relay_index] = {'phase': 'ON', 'phase_start': now}
+        return True
+
+    elif phase == 'ON':
+        if elapsed < PULSE_ON_SECONDS:
+            return True                 # still in ON window
+        else:
+            # ON time expired → switch to OFF phase
+            pulse_state[relay_index] = {'phase': 'OFF', 'phase_start': now}
+            return False
+
+    else:  # phase == 'OFF'
+        if elapsed < PULSE_OFF_SECONDS:
+            return False                # still in OFF window
+        else:
+            # OFF time expired → start next ON phase
+            pulse_state[relay_index] = {'phase': 'ON', 'phase_start': now}
+            return True
+
 # SENSOR-SPECIFIC ABSOLUTE MARGINS (instead of percentage-based hysteresis)
 # Prevents oscillation by using absolute values calibrated per sensor type
 # ⭐ OPTIMIZED FOR NOISY SENSORS: Balanced margins to prevent oscillation without losing control
 SENSOR_MARGINS = {
-    'temp': 2.0,      # Temperature: 2°C margin (increased for stability)
-    'hum': 5.0,       # Humidity: 5% margin (increased - air_hum can be noisy)
-    'lux': 200.0,     # Light: 200 lux margin (very large for sensors with 0-1024 range noise)
-    'soil_hum': 15.0, # Soil Humidity: 15% margin (VERY LARGE - Valve3 bounces 33-86%!)
-    'ph': 0.3,        # pH: 0.3 unit margin (slightly increased for stability)
-    'co2': 100.0,     # CO2: 100 ppm margin (increased)
-    'n': 10.0,        # Nitrogen: 10 ppm margin (increased)
-    'p': 10.0,        # Phosphorus: 10 ppm margin (increased)
-    'k': 10.0         # Potassium: 10 ppm margin (increased)
+    'temp': 0.0,        # Temperature: pure binary (OFF immediately when crosses threshold)
+    'hum': 0.0,         # Humidity: pure binary
+    'lux': 0.0,         # Light: pure binary
+    'soil_hum': 0.0,    # Soil Humidity: pure binary
+    'soil_2_hum': 0.0,  # Soil 2 Humidity: pure binary
+    'ph': 0.0,          # pH: pure binary
+    'co2': 0.0,         # CO2: pure binary
+    'n': 0.0,           # Nitrogen: pure binary
+    'p': 0.0,           # Phosphorus: pure binary
+    'k': 0.0            # Potassium: pure binary
 }
 
 def get_sensor_margin(param):
@@ -392,6 +429,12 @@ def init_db():
                      (id INTEGER PRIMARY KEY AUTOINCREMENT,
                       timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
                       soil_1 REAL, soil_2 REAL, soil_3 REAL, soil_4 REAL)''')
+        # Migration: add ph/npk columns for Node3 S1 (7-in-1 sensor) if not already present
+        for col in ['soil_1_ph', 'soil_1_n', 'soil_1_p', 'soil_1_k']:
+            try:
+                c.execute(f'ALTER TABLE soil_sensors_node3 ADD COLUMN {col} REAL DEFAULT 0')
+            except Exception:
+                pass  # Column already exists
         
         # System state persistence table
         c.execute('''CREATE TABLE IF NOT EXISTS system_state 
@@ -410,7 +453,18 @@ def init_db():
                      (relay_index INTEGER PRIMARY KEY,
                       config TEXT,
                       updated_at DATETIME DEFAULT CURRENT_TIMESTAMP)''')
-        
+
+        # Relay modes config table (AUTO/MANUAL per relay)
+        c.execute('''CREATE TABLE IF NOT EXISTS relay_modes_config
+                     (relay_index INTEGER PRIMARY KEY,
+                      mode TEXT DEFAULT 'MANUAL',
+                      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP)''')
+
+        # Indexes for fast range queries (timestamp-based filtering)
+        c.execute('CREATE INDEX IF NOT EXISTS idx_sensors_timestamp ON sensors(timestamp)')
+        c.execute('CREATE INDEX IF NOT EXISTS idx_relay_history_relay_ts ON relay_history(relay_index, timestamp)')
+        c.execute('CREATE INDEX IF NOT EXISTS idx_node3_timestamp ON soil_sensors_node3(timestamp)')
+
         conn.commit()
         logger.info("✅ Database Initialized Successfully")
 
@@ -455,7 +509,7 @@ def save_sensor_data(data):
         soil_1 = data.get('soil_1', {})
         soil_2 = data.get('soil_2', {})
         env = data.get('env', {})
-        
+
         with sqlite3.connect(DB_NAME) as conn:
             c = conn.cursor()
             c.execute('''INSERT INTO sensors 
@@ -487,18 +541,30 @@ def save_soil_sensor_data(data):
             if isinstance(val, dict):
                 return float(val.get('hum', 0.0))
             return float(val) if val is not None else 0.0
-            
+
+        # Extract ph/n/p/k from soil_1 (7-in-1 sensor on Node 3)
+        soil_1_data = data.get('soil_1', {})
+        if isinstance(soil_1_data, dict):
+            soil_1_ph = float(soil_1_data.get('ph', 0.0))
+            soil_1_n  = float(soil_1_data.get('n',  0.0))
+            soil_1_p  = float(soil_1_data.get('p',  0.0))
+            soil_1_k  = float(soil_1_data.get('k',  0.0))
+        else:
+            soil_1_ph = soil_1_n = soil_1_p = soil_1_k = 0.0
+
         with sqlite3.connect(DB_NAME) as conn:
             c = conn.cursor()
             c.execute('''INSERT INTO soil_sensors_node3 
-                         (timestamp, soil_1, soil_2, soil_3, soil_4) 
-                         VALUES (?, ?, ?, ?, ?)''',
+                         (timestamp, soil_1, soil_2, soil_3, soil_4,
+                          soil_1_ph, soil_1_n, soil_1_p, soil_1_k) 
+                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)''',
                       (
                           get_current_timestamp(),
                           get_hum(data.get('soil_1', 0.0)),
                           get_hum(data.get('soil_2', 0.0)),
                           get_hum(data.get('soil_3', 0.0)),
-                          get_hum(data.get('soil_4', 0.0))
+                          get_hum(data.get('soil_4', 0.0)),
+                          soil_1_ph, soil_1_n, soil_1_p, soil_1_k
                       ))
             conn.commit()
             logger.debug(f"🌱 Soil sensor data saved to database: {data}")
@@ -597,21 +663,31 @@ def load_relay_configs_from_db():
             
             loaded_count = 0
             
-            # ⭐ CRITICAL: Only load if database has exactly correct defaults, otherwise ignore
             if rows:
-                # Don't load from database - use hardcoded defaults only
-                # Database might be corrupted or have incorrect values
-                logger.warning(f"⚠️ Database has {len(rows)} entries but IGNORING them - using hardcoded defaults only")
-                logger.warning(f"⚠️ To reset defaults, delete smartfarm.db and restart")
+                # ⭐ LOAD FROM DATABASE: Use configs saved from UI settings
+                loaded_count = 0
+                for row in rows:
+                    try:
+                        relay_index = row['relay_index']
+                        config = json.loads(row['config'])
+                        # Validate config has required fields (single or dual sensor)
+                        is_dual = 'target1' in config and 'param1' in config
+                        is_single = 'target' in config and 'param' in config
+                        if is_dual or is_single:
+                            relay_configs[relay_index] = config
+                            loaded_count += 1
+                            logger.info(f"   ✅ Loaded Relay {relay_index} from DB: {config}")
+                        else:
+                            logger.warning(f"   ⚠️ Relay {relay_index}: Invalid config in DB {config}, keeping default")
+                    except Exception as row_err:
+                        logger.warning(f"   ⚠️ Failed to load row: {row_err}")
+                logger.info(f"✅ Loaded {loaded_count}/{len(rows)} relay configs from database")
             else:
                 logger.info("ℹ️ No saved relay configs found. Saving defaults to database...")
                 # ⭐ CRITICAL: Save defaults to database for persistence
                 for relay_index in range(12):
                     config = relay_configs[relay_index]
-                    logger.info(f"   About to save Relay {relay_index}: {config}")
-                    logger.info(f"      relay_configs[{relay_index}]['condition'] = '{config.get('condition', config.get('condition1', 'N/A'))}'")
                     json_str = json.dumps(config)
-                    logger.info(f"      JSON string: {json_str}")
                     c.execute(
                         "INSERT OR REPLACE INTO relay_configs_db (relay_index, config) VALUES (?, ?)",
                         (relay_index, json_str)
@@ -668,6 +744,13 @@ def normalize_sensor_data(payload):
     
     return normalized
 
+def build_status_payload():
+    """Build status payload with sensor_fresh always included — use for all status_update emissions"""
+    with state_lock:
+        payload = {**current_state["status"], "relay_modes": relay_modes}
+    payload["sensor_fresh"] = sensor_watchdog.is_data_fresh
+    return payload
+
 def evaluate_auto_mode(normalized_sensors):
     """
     ⭐ BINARY AUTO MODE WITH STRICT STATE CHECKING ⭐
@@ -685,12 +768,8 @@ def evaluate_auto_mode(normalized_sensors):
         soil_1_hum = normalized_sensors.get('soil_1', {}).get('hum')
         soil_2_hum = normalized_sensors.get('soil_2', {}).get('hum')
         
-        if soil_1_hum is not None and soil_2_hum is not None:
-            soil_hum = (float(soil_1_hum) + float(soil_2_hum)) / 2.0
-        elif soil_1_hum is not None:
-            soil_hum = float(soil_1_hum)
-        elif soil_2_hum is not None:
-            soil_hum = float(soil_2_hum)
+        if soil_1_hum is not None:
+            soil_hum = float(soil_1_hum)   # ใช้ Sensor 1 เท่านั้น (ไม่เฉลี่ยกับ Sensor 2)
         else:
             soil_hum = None
             
@@ -777,20 +856,21 @@ def evaluate_auto_mode(normalized_sensors):
                 logic = str(config.get('logic', 'OR')).strip().upper()  # Default to OR
 
                 sensor_dict = {
-                    'soil_hum': soil_hum, 
+                    'soil_hum': soil_hum,       # Average of soil_1 & soil_2 (Node 1)
+                    'soil_2_hum': soil_2_hum,   # Node 1 Soil 2 humidity (matches frontend param)
                     'temp': air_temp, 
                     'hum': air_hum, 
                     'lux': lux, 
                     'co2': co2,
-                    'soil_2': soil_2_hum,  # Main Node Soil 2
-                    's1_hum': s1_hum,      # Node 3 S1 Hum
-                    's1_ph': s1_ph,        # Node 3 S1 pH
-                    's1_n': s1_n,          # Node 3 S1 N
-                    's1_p': s1_p,          # Node 3 S1 P
-                    's1_k': s1_k,          # Node 3 S1 K
-                    's2_hum': s2_hum,      # Node 3 S2 Hum
-                    's3_hum': s3_hum,      # Node 3 S3 Hum
-                    's4_hum': s4_hum       # Node 3 S4 Hum
+                    'soil_2': soil_2_hum,       # Alias for backward compat
+                    's1_hum': s1_hum,           # Node 3 S1 Hum
+                    's1_ph': s1_ph,             # Node 3 S1 pH
+                    's1_n': s1_n,               # Node 3 S1 N
+                    's1_p': s1_p,               # Node 3 S1 P
+                    's1_k': s1_k,               # Node 3 S1 K
+                    's2_hum': s2_hum,           # Node 3 S2 Hum
+                    's3_hum': s3_hum,           # Node 3 S3 Hum
+                    's4_hum': s4_hum            # Node 3 S4 Hum
                 }
                 sensor_value1 = sensor_dict.get(param1)
                 sensor_value2 = sensor_dict.get(param2)
@@ -862,20 +942,21 @@ def evaluate_auto_mode(normalized_sensors):
                 param = str(config.get('param', 'soil_hum')).strip()
 
                 sensor_dict = {
-                    'soil_hum': soil_hum, 
+                    'soil_hum': soil_hum,       # Average of soil_1 & soil_2 (Node 1)
+                    'soil_2_hum': soil_2_hum,   # Node 1 Soil 2 humidity (matches frontend param)
                     'temp': air_temp, 
                     'hum': air_hum, 
                     'lux': lux, 
                     'co2': co2,
-                    'soil_2': soil_2_hum,  # Main Node Soil 2
-                    's1_hum': s1_hum,      # Node 3 S1 Hum
-                    's1_ph': s1_ph,        # Node 3 S1 pH
-                    's1_n': s1_n,          # Node 3 S1 N
-                    's1_p': s1_p,          # Node 3 S1 P
-                    's1_k': s1_k,          # Node 3 S1 K
-                    's2_hum': s2_hum,      # Node 3 S2 Hum
-                    's3_hum': s3_hum,      # Node 3 S3 Hum
-                    's4_hum': s4_hum       # Node 3 S4 Hum
+                    'soil_2': soil_2_hum,       # Alias for backward compat
+                    's1_hum': s1_hum,           # Node 3 S1 Hum
+                    's1_ph': s1_ph,             # Node 3 S1 pH
+                    's1_n': s1_n,               # Node 3 S1 N
+                    's1_p': s1_p,               # Node 3 S1 P
+                    's1_k': s1_k,               # Node 3 S1 K
+                    's2_hum': s2_hum,           # Node 3 S2 Hum
+                    's3_hum': s3_hum,           # Node 3 S3 Hum
+                    's4_hum': s4_hum            # Node 3 S4 Hum
                 }
                 sensor_value = sensor_dict.get(param)
                 
@@ -910,6 +991,11 @@ def evaluate_auto_mode(normalized_sensors):
                 
                 logger.info(f"Relay {relay_index}: {sensor_value} {condition} {target}±{margin} => {should_turn_on}")
             
+            # ===== PULSE MODE OVERRIDE FOR VALVE RELAYS =====
+            if relay_index in PULSE_RELAYS:
+                should_turn_on = evaluate_pulse(relay_index, should_turn_on, current_relay_state)
+                logger.info(f"🔄 PULSE Relay {relay_index}: phase={pulse_state[relay_index]['phase']} => {should_turn_on}")
+
             # ⭐⭐⭐ STRICT STATE CHECKING ⭐⭐⭐
             # ONLY publish MQTT if state ACTUALLY CHANGED
             # Compare new state against the KNOWN current state (source of truth)
@@ -953,6 +1039,18 @@ def evaluate_auto_mode(normalized_sensors):
                 except Exception as mqtt_err:
                     logger.error(f"❌ MQTT publish error for relay {relay_index}: {mqtt_err}")
                 
+                # ⭐ LOG AUTO STATE CHANGE TO DB so continuous_backup.py reads correct state
+                try:
+                    with sqlite3.connect('../Database/smartfarm_myweb.db') as _conn:
+                        _c = _conn.cursor()
+                        _c.execute(
+                            "INSERT INTO relay_history (timestamp, relay_index, state, mode) VALUES (?, ?, ?, ?)",
+                            (get_current_timestamp(), relay_index, should_turn_on, "AUTO")
+                        )
+                        _conn.commit()
+                except Exception as _db_err:
+                    logger.warning(f"⚠️ Could not log AUTO relay state to DB: {_db_err}")
+
                 # ⭐ Emit WebSocket event
                 socketio.emit('relay_update', {
                     'relay_index': relay_index,
@@ -963,12 +1061,7 @@ def evaluate_auto_mode(normalized_sensors):
 
                 # ⭐ CRITICAL FIX: Emit status_update because frontend listens to THIS for UI updates
                 # Without this, the diamond status indicator (◆) won't update until next refresh
-                with state_lock:
-                    status_with_modes = {
-                        **current_state["status"],
-                        "relay_modes": relay_modes
-                    }
-                socketio.emit('status_update', status_with_modes, to=None)
+                socketio.emit('status_update', build_status_payload(), to=None)
     except Exception as e:
         logger.error(f"❌ AUTO Mode Error: {e}")
         import traceback
@@ -987,23 +1080,24 @@ def on_mqtt_message(client, userdata, msg):
         logger.info(f"📨 MQTT Message: topic={topic}, payload={payload_str[:100]}")  # ⭐ Log all messages
         
         if topic == MQTT_TOPIC_SENSORS:
-            # ⭐ UPDATE SENSOR WATCHDOG: Mark sensor data as fresh
-            sensor_watchdog.update_sensor_data()
-            
             # Normalize data format (convert from MQTT to dashboard schema)
             normalized_payload = normalize_sensor_data(payload)
-            
+
+            # ✅ Update watchdog whenever MQTT message is received (ESP is connected)
+            # Connectivity = receiving MQTT messages; value content does not affect this
+            sensor_watchdog.update_sensor_data()
+
             # Update sensor data in RAM with thread safety
             with state_lock:
                 current_state["sensors"] = normalized_payload
                 current_state["status"]["last_update"] = datetime.now(BANGKOK_TZ).isoformat()
-                current_state["status"]["esp32_status"] = sensor_watchdog.get_status_message()  # ⭐ Update ESP32 status
+                current_state["status"]["esp32_status"] = sensor_watchdog.get_status_message()
             
             # Save to database asynchronously
             threading.Thread(target=save_sensor_data, args=(normalized_payload,), daemon=True).start()
             
-            # Emit to all connected clients in real-time (zero latency) with normalized data
-            socketio.emit('sensor_update', normalized_payload, to=None)
+            # Emit to all connected clients; _fresh = watchdog freshness (timeout-based only)
+            socketio.emit('sensor_update', {**normalized_payload, "_fresh": sensor_watchdog.is_data_fresh}, to=None)
             logger.info(f"📡 Sensor Data Received: {payload} → Normalized: {normalized_payload}")
             
             # ⭐ NEW: Evaluate AUTO mode conditions and control relays
@@ -1062,11 +1156,7 @@ def on_mqtt_message(client, userdata, msg):
                 current_state["status"]["last_update"] = datetime.now(BANGKOK_TZ).isoformat()
 
             # Broadcast CURRENT server state to all clients (not what ESP32 sent)
-            status_with_modes = {
-                **current_state["status"],
-                "relay_modes": relay_modes
-            }
-            socketio.emit('status_update', status_with_modes, to=None)
+            socketio.emit('status_update', build_status_payload(), to=None)
             logger.info(f"💡 Broadcast Server State (relay_modes={relay_modes})")
             
     except Exception as e:
@@ -1079,16 +1169,24 @@ def on_mqtt_disconnect(client, userdata, rc):
         logger.warning(f"⚠️ Unexpected MQTT disconnection with code {rc}")
 
 def start_mqtt_client():
-    """Start MQTT client in background thread"""
-    try:
-        mqtt_client.on_connect = on_mqtt_connect
-        mqtt_client.on_message = on_mqtt_message
-        mqtt_client.on_disconnect = on_mqtt_disconnect
-        mqtt_client.connect(MQTT_BROKER, MQTT_PORT, keepalive=60)
-        mqtt_client.loop_start()
-        logger.info("🚀 MQTT Client Loop Started")
-    except Exception as e:
-        logger.error(f"❌ MQTT Connection Failed: {e}")
+    """Start MQTT client with retry loop — handles broker not-yet-ready at startup"""
+    mqtt_client.on_connect = on_mqtt_connect
+    mqtt_client.on_message = on_mqtt_message
+    mqtt_client.on_disconnect = on_mqtt_disconnect
+    mqtt_client.reconnect_delay_set(min_delay=2, max_delay=30)
+
+    def _connect_with_retry():
+        while True:
+            try:
+                mqtt_client.connect(MQTT_BROKER, MQTT_PORT, keepalive=60)
+                mqtt_client.loop_start()
+                logger.info("🚀 MQTT Client Loop Started — connected to broker")
+                return  # loop_start handles all future reconnections automatically
+            except Exception as e:
+                logger.error(f"❌ MQTT Connection Failed: {e} — retrying in 5s")
+                time.sleep(5)
+
+    threading.Thread(target=_connect_with_retry, daemon=True, name="mqtt-connect").start()
 
 # --- REST API ENDPOINTS ---
 @app.route('/api/health', methods=['GET'])
@@ -1103,13 +1201,9 @@ def health_check():
 @socketio.on('connect')
 def handle_connect():
     logger.info(f"🔗 Client connected: {request.sid}")
-    # Send current state to new client
-    emit('sensor_update', current_state["sensors"])
-    status_with_modes = {
-        **current_state["status"],
-        "relay_modes": relay_modes
-    }
-    emit('status_update', status_with_modes)
+    # Send current state to new client (include freshness flag)
+    emit('sensor_update', {**current_state["sensors"], "_fresh": sensor_watchdog.is_data_fresh})
+    emit('status_update', build_status_payload())
 
 @socketio.on('disconnect')
 def handle_disconnect():
@@ -1119,12 +1213,8 @@ def handle_disconnect():
 def handle_request_state():
     """Client can request full state at any time"""
     with state_lock:
-        emit('sensor_update', current_state["sensors"])
-        status_with_modes = {
-            **current_state["status"],
-            "relay_modes": relay_modes
-        }
-        emit('status_update', status_with_modes)
+        emit('sensor_update', {**current_state["sensors"], "_fresh": sensor_watchdog.is_data_fresh})
+        emit('status_update', build_status_payload())
 
 # --- API ROUTES ---
 @app.route('/')
@@ -1300,12 +1390,7 @@ def control_relay():
             logger.warning(f"⚠️ Could not log relay action: {e}")
         
         # Broadcast status update with mode info
-        with state_lock:
-            status_with_modes = {
-                **current_state["status"],
-                "relay_modes": relay_modes
-            }
-        socketio.emit('status_update', status_with_modes, to=None)
+        socketio.emit('status_update', build_status_payload(), to=None)
         logger.info(f"✅ Status broadcasted to all clients")
         
         logger.info(f"🔌 Relay {relay_index} set to {relay_state} (Mode: MANUAL)")
@@ -1455,11 +1540,7 @@ def set_relay_modes():
             # with the new mode setting already in place
             
             # Broadcast updated status to all clients with relay_modes
-            status_with_modes = {
-                **current_state["status"],
-                "relay_modes": relay_modes
-            }
-            socketio.emit('status_update', status_with_modes, to=None)
+            socketio.emit('status_update', build_status_payload(), to=None)
             
             return jsonify({
                 "status": "success",
@@ -1516,7 +1597,7 @@ def get_relay_configs():
         config = relay_configs[relay_index]
         
         # Get current sensor value based on config
-        if relay_index == 1 and 'target1' in config:  # Dual sensor
+        if 'target1' in config:  # Dual sensor (relay 1, 6, 9 etc.)
             param1 = config.get('param1', 'temp')
             param2 = config.get('param2', 'hum')
             
@@ -1614,8 +1695,8 @@ def set_relay_config():
         if relay_index not in range(0, 12):
             return jsonify({"status": "error", "message": "Invalid relay index (must be 0-11)"}), 400
         
-        # Check if it's dual sensor config (for Fan - relay 1)
-        if relay_index == 1 and 'target1' in data:
+        # Check if it's dual sensor config (relay 1, 6, 9 etc.)
+        if 'target1' in data:
             # Dual sensor config
             target1 = data.get('target1', 0)
             condition1 = data.get('condition1', '<')
@@ -1627,7 +1708,7 @@ def set_relay_config():
             
             logic = data.get('logic', 'OR')
             
-            valid_params = ['soil_hum', 'temp', 'hum', 'lux', 'co2', 'soil_2', 's1_hum', 's1_ph', 's1_n', 's1_p', 's1_k', 's2_hum', 's3_hum', 's4_hum']
+            valid_params = ['soil_hum', 'soil_2_hum', 'temp', 'hum', 'lux', 'co2', 'soil_2', 's1_hum', 's1_ph', 's1_n', 's1_p', 's1_k', 's2_hum', 's3_hum', 's4_hum']
             if param1 not in valid_params or param2 not in valid_params:
                 return jsonify({"status": "error", "message": f"Parameter must be one of {valid_params}"}), 400
             
@@ -1667,7 +1748,7 @@ def set_relay_config():
                 logger.error(f"❌ Invalid condition: {condition!r} (expected '<' or '>')")
                 return jsonify({"status": "error", "message": "Condition must be < or >"}), 400
             
-            valid_params = ['soil_hum', 'temp', 'hum', 'lux', 'co2', 'soil_2', 's1_hum', 's1_ph', 's1_n', 's1_p', 's1_k', 's2_hum', 's3_hum', 's4_hum']
+            valid_params = ['soil_hum', 'soil_2_hum', 'temp', 'hum', 'lux', 'co2', 'soil_2', 's1_hum', 's1_ph', 's1_n', 's1_p', 's1_k', 's2_hum', 's3_hum', 's4_hum']
             if param not in valid_params:
                 return jsonify({"status": "error", "message": f"Parameter must be one of {valid_params}"}), 400
             
@@ -1772,6 +1853,8 @@ def continuous_mock_sensor_publisher():
     last_publish = time.time()
     last_status_check = 0  # Force immediate check
     sensor_is_fresh = False
+    prev_is_fresh = False          # Track previous state to detect transition
+    last_stale_broadcast = 0      # Last time we broadcast _fresh=False
     
     while CONTINUOUS_MOCK_ENABLED:
         try:
@@ -1786,6 +1869,37 @@ def continuous_mock_sensor_publisher():
                 is_fresh = True
                 
             sensor_is_fresh = is_fresh
+
+            # ⭐ DISCONNECT DETECTION: broadcast _fresh=False when ESP goes stale
+            if prev_is_fresh and not is_fresh:
+                # Transition: fresh → stale  (ESP just disconnected)
+                logger.warning("⚠️ ESP32 disconnected — broadcasting _fresh=False to all clients")
+                with state_lock:
+                    stale_payload = dict(current_state["sensors"])
+                stale_payload["_fresh"] = False
+                socketio.emit('sensor_update', stale_payload, to=None)
+                last_stale_broadcast = now
+
+            # ⭐ RECONNECT DETECTION: broadcast _fresh=True when ESP comes back
+            if not prev_is_fresh and is_fresh:
+                # Transition: stale → fresh (ESP reconnected)
+                logger.info("✅ ESP32 reconnected — broadcasting _fresh=True and status update to all clients")
+                with state_lock:
+                    fresh_payload = dict(current_state["sensors"])
+                fresh_payload["_fresh"] = True
+                socketio.emit('sensor_update', fresh_payload, to=None)
+                socketio.emit('status_update', build_status_payload(), to=None)
+
+            # Also re-broadcast every 1s while stale (real-time disconnection detection)
+            if not is_fresh and (now - last_stale_broadcast >= 1):
+                with state_lock:
+                    stale_payload = dict(current_state["sensors"])
+                stale_payload["_fresh"] = False
+                socketio.emit('sensor_update', stale_payload, to=None)
+                socketio.emit('status_update', build_status_payload(), to=None)
+                last_stale_broadcast = now
+
+            prev_is_fresh = is_fresh
 
             if now - last_status_check >= 1.0:
                 last_status_check = now
@@ -1840,626 +1954,396 @@ def continuous_mock_sensor_publisher():
         time.sleep(0.1)
 
 # --- MAIN EXECUTION ---
+
+# ─── Backup-file parse helpers (new 6-line format) ───────────────────────────
+def _parse_env_line(content, sensors):
+    """ENV line: AirTemp:29.0C AirHum:61% Light:101lux CO2:768ppm"""
+    import re
+    m = re.search(r'AirTemp:([\d.]+)', content);    sensors['temp']     = float(m.group(1)) if m else sensors.get('temp')
+    m = re.search(r'AirHum:([\d.]+)',  content);    sensors['humidity'] = float(m.group(1)) if m else sensors.get('humidity')
+    m = re.search(r'Light:([\d.]+)',   content);    sensors['lux']      = float(m.group(1)) if m else sensors.get('lux')
+    m = re.search(r'CO2:([\d.]+)',     content);    sensors['co2']      = float(m.group(1)) if m else sensors.get('co2')
+
+def _parse_z1_line(content, sensors):
+    """Z1 line: SoilMoist1 แปลง1:87% SoilMoist2 แปลง1:62% SoilMoist3 แปลง1:27% pH แปลง1:7.1 N:77 P:224 K:218"""
+    import re
+    m = re.search(r'SoilMoist1 \u0e41\u0e1b\u0e25\u0e071:([\d.]+)%', content); sensors['soil_1']       = float(m.group(1)) if m else sensors.get('soil_1')
+    m = re.search(r'SoilMoist2 \u0e41\u0e1b\u0e25\u0e071:([\d.]+)%', content); sensors['soil_2']       = float(m.group(1)) if m else sensors.get('soil_2')
+    m = re.search(r'SoilMoist3 \u0e41\u0e1b\u0e25\u0e071:([\d.]+)%', content); sensors['node3_s2_hum'] = float(m.group(1)) if m else sensors.get('node3_s2_hum')
+    m = re.search(r'pH \u0e41\u0e1b\u0e25\u0e071:([\d.]+)',          content); sensors['soil_1_ph']    = float(m.group(1)) if m else sensors.get('soil_1_ph')
+    m = re.search(r'N:([\d.]+)',  content);    sensors['soil_1_n'] = float(m.group(1)) if m else sensors.get('soil_1_n')
+    m = re.search(r'P:([\d.]+)',  content);    sensors['soil_1_p'] = float(m.group(1)) if m else sensors.get('soil_1_p')
+    m = re.search(r'K:([\d.]+)',  content);    sensors['soil_1_k'] = float(m.group(1)) if m else sensors.get('soil_1_k')
+
+def _parse_z2_line(content, sensors):
+    """Z2 line: SoilMoist1 แปลง2:67% SoilMoist2 แปลง2:26% SoilMoist3 แปลง2:10% pH แปลง2:5.5 N:62 P:191 K:185"""
+    import re
+    m = re.search(r'SoilMoist1 \u0e41\u0e1b\u0e25\u0e072:([\d.]+)%', content); sensors['node3_s1_hum'] = float(m.group(1)) if m else sensors.get('node3_s1_hum')
+    m = re.search(r'SoilMoist2 \u0e41\u0e1b\u0e25\u0e072:([\d.]+)%', content); sensors['node3_s3_hum'] = float(m.group(1)) if m else sensors.get('node3_s3_hum')
+    m = re.search(r'SoilMoist3 \u0e41\u0e1b\u0e25\u0e072:([\d.]+)%', content); sensors['node3_s4_hum'] = float(m.group(1)) if m else sensors.get('node3_s4_hum')
+    m = re.search(r'pH \u0e41\u0e1b\u0e25\u0e072:([\d.]+)',          content); sensors['node3_s1_ph']  = float(m.group(1)) if m else sensors.get('node3_s1_ph')
+    m = re.search(r'N:([\d.]+)',  content);    sensors['node3_s1_n'] = float(m.group(1)) if m else sensors.get('node3_s1_n')
+    m = re.search(r'P:([\d.]+)',  content);    sensors['node3_s1_p'] = float(m.group(1)) if m else sensors.get('node3_s1_p')
+    m = re.search(r'K:([\d.]+)',  content);    sensors['node3_s1_k'] = float(m.group(1)) if m else sensors.get('node3_s1_k')
+
+def _parse_relay_new_line(content, relays):
+    """Parse new-format relay line (Thai names) and store under old English keys for compatibility"""
+    import re
+    _MAP = {
+        'พัดลม': 'Fan', 'ไฟส่องสว่าง': 'Lamp', 'พ่นหมอก': 'Mist', 'ปั้มEvap': 'EvapPump',
+        'ปั้มแปลง1': 'Pump',
+        'วาล์ว1-แปลง1': 'V1-P1', 'วาล์ว2-แปลง1': 'V2-P1', 'วาล์ว3-แปลง1': 'V3-P1',
+        'ปั้มแปลง2': 'Plot Pump 2',
+        'วาล์ว1-แปลง2': 'V1-P2', 'วาล์ว2-แปลง2': 'V2-P2', 'วาล์ว3-แปลง2': 'V3-P2',
+    }
+    for thai, eng in _MAP.items():
+        m = re.search(rf'{re.escape(thai)}:([A-Z]+)/([A-Z]+)', content)
+        if m:
+            relays[eng] = {'state': m.group(1), 'mode': m.group(2)}
+# ─── SQL-backed data helpers (replaces DATABASE_BACKUP.txt parsing) ──────────
+
+# Relay index → frontend key mapping (must match DataTablePage.jsx RELAY_COLS)
+_RELAY_IDX_NAME = {
+    0: 'Pump', 1: 'Fan', 2: 'Lamp', 3: 'Mist',
+    4: 'Plot Pump 2', 5: 'EvapPump',
+    6: 'V1-P1', 7: 'V2-P1', 8: 'V3-P1',
+    9: 'V1-P2', 10: 'V2-P2', 11: 'V3-P2',
+}
+
+def _relay_snapshot_at(cur, ts_str):
+    """Return {relay_name: {state, mode}} for all relays at/before ts_str"""
+    cur.execute("""
+        SELECT relay_index, state, mode FROM relay_history
+        WHERE id IN (
+            SELECT MAX(id) FROM relay_history
+            WHERE timestamp <= ?
+            GROUP BY relay_index
+        )
+    """, (ts_str,))
+    result = {}
+    for idx, st, md in cur.fetchall():
+        name = _RELAY_IDX_NAME.get(idx)
+        if name:
+            result[name] = {'state': 'ON' if st else 'OFF', 'mode': md or 'MANUAL'}
+    return result
+
+def _n3_dict(row):
+    """Convert soil_sensors_node3 row tuple to frontend node3 fields"""
+    if not row:
+        return {}
+    return {
+        'node3_s1_hum': row[0], 'node3_s2_hum': row[1],
+        'node3_s3_hum': row[2], 'node3_s4_hum': row[3],
+        'node3_s1_ph':  row[4], 'node3_s1_n':   row[5],
+        'node3_s1_p':   row[6], 'node3_s1_k':   row[7],
+    }
+
+def _start_db_auto_trim():
+    """Background thread: trim sensor/node3 data older than 30 days, runs daily"""
+    def _trim_loop():
+        while True:
+            try:
+                cutoff = (datetime.now(BANGKOK_TZ) - timedelta(days=30)).strftime('%Y-%m-%d %H:%M:%S')
+                with sqlite3.connect(DB_NAME) as conn:
+                    c = conn.cursor()
+                    c.execute("DELETE FROM sensors WHERE timestamp < ?", (cutoff,))
+                    c.execute("DELETE FROM soil_sensors_node3 WHERE timestamp < ?", (cutoff,))
+                    deleted = conn.total_changes
+                    if deleted:
+                        logger.info(f"🧹 Auto-trim: removed {deleted} rows older than 30 days")
+                    c.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            except Exception as e:
+                logger.error(f"❌ Auto-trim error: {e}")
+            time.sleep(86400)  # Run once per day
+    threading.Thread(target=_trim_loop, daemon=True).start()
+    logger.info("🗓️  DB auto-trim started (keeps last 30 days)")
+
+# ─────────────────────────────────────────────────────────────────────────────
+
 @app.route('/api/backup-data', methods=['GET'])
 def get_backup_data():
-    """Get data from DATABASE_BACKUP.txt with optional pagination and filtering"""
+    """Paginated raw sensor + relay data from SQLite"""
     try:
-        limit = request.args.get('limit', 100, type=int)  # Max 100 rows
+        limit  = request.args.get('limit', 100, type=int)
         offset = request.args.get('offset', 0, type=int)
-        
-        # Use absolute path for robustness
-        backup_file = os.path.join(os.path.dirname(SCRIPT_DIR), "Database", "DATABASE_BACKUP.txt")
-        data = []
-        
-        if not os.path.exists(backup_file):
-             logger.warning(f"⚠️ Backup file not found: {backup_file}")
-             return jsonify({'status': 'success', 'data': [], 'total': 0}), 200
 
-        with open(backup_file, 'r', encoding='utf-8') as f:
-            lines = f.readlines()
-        
-        # Parse lines
-        last_valid_timestamp = None
-        
-        for line in lines:
-            line = line.strip()
-            if not line:
-                continue
-            
-            try:
-                parts = line.split(' | ')
-                if len(parts) < 2:
-                    continue
-                
-                # Check for timestamp
-                timestamp_part = parts[0].strip()
-                if timestamp_part and len(timestamp_part) > 10:  # Simple check for valid timestamp
-                    current_timestamp = timestamp_part
-                    last_valid_timestamp = current_timestamp
-                else:
-                    # If empty timestamp (relay line), use the last valid one
-                    if last_valid_timestamp:
-                        current_timestamp = last_valid_timestamp
-                    else:
-                        continue  # Skip if we don't have a timestamp yet
+        with sqlite3.connect(DB_NAME) as conn:
+            conn.row_factory = sqlite3.Row
+            cur = conn.cursor()
 
-                # Parse sensor data (even indices are sensor lines)
-                if 'T:' in parts[1] and 'H:' in parts[1]:
-                    # Sensor line: T:30.4°C H:37.1% S1:100% S2:97.6% L:118lux C:1171ppm
-                    sensor_str = parts[1]
-                    sensors = {}
-                    
-                    # Extract T (temperature)
-                    import re
-                    t_match = re.search(r'T:([\d.]+)', sensor_str)
-                    if t_match:
-                        sensors['temp'] = float(t_match.group(1))
-                    
-                    # Extract H (humidity)
-                    h_match = re.search(r'H:([\d.]+)', sensor_str)
-                    if h_match:
-                        sensors['humidity'] = float(h_match.group(1))
-                    
-                    # Extract S1 (soil 1) - Support both formats
-                    # Format 2: Soil1(H:50% pH:6.5 N:100 P:50 K:80)
-                    s1_complex_match = re.search(r'Soil1\(H:([\d.]+)', sensor_str)
-                    if s1_complex_match:
-                         sensors['soil_1'] = float(s1_complex_match.group(1))
-                         
-                         # Also extract pH, N, P, K if available
-                         try:
-                             # Extract content inside Soil1(...)
-                             soil1_content = sensor_str.split('Soil1(')[1].split(')')[0]
-                             
-                             ph_match = re.search(r'pH:([\d.]+)', soil1_content)
-                             if ph_match: sensors['soil_1_ph'] = float(ph_match.group(1))
-                             
-                             n_match = re.search(r'N:([\d.]+)', soil1_content)
-                             if n_match: sensors['soil_1_n'] = float(n_match.group(1))
-                             
-                             p_match = re.search(r'P:([\d.]+)', soil1_content)
-                             if p_match: sensors['soil_1_p'] = float(p_match.group(1))
-                             
-                             k_match = re.search(r'K:([\d.]+)', soil1_content)
-                             if k_match: sensors['soil_1_k'] = float(k_match.group(1))
-                         except IndexError:
-                             pass # Malformed Soil1 block or not present as expected
-                    
-                    # Format 1: S1:50% (Legacy/Fallback)
-                    elif 'S1:' in sensor_str:
-                         s1_match = re.search(r'S1:([\d.]+)', sensor_str)
-                         if s1_match:
-                             sensors['soil_1'] = float(s1_match.group(1))
-                    
-                    # Format 3: Soil1:50% (Intermediate)
-                    elif 'Soil1:' in sensor_str:
-                         s1_match = re.search(r'Soil1:([\d.]+)', sensor_str)
-                         if s1_match:
-                             sensors['soil_1'] = float(s1_match.group(1))
-                    
-                    # Extract S2 (soil 2)
-                    s2_match = re.search(r'Soil2:([\d.]+)', sensor_str)
-                    if s2_match:
-                        sensors['soil_2'] = float(s2_match.group(1))
-                    elif 'S2:' in sensor_str and 'Node3' not in sensor_str: # Avoid matching Node 3 S2 if possible, though strict regex helps
-                         s2_legacy = re.search(r'S2:([\d.]+)', sensor_str)
-                         if s2_legacy:
-                             sensors['soil_2'] = float(s2_legacy.group(1))
-                    
-                    # Extract L (light)
-                    l_match = re.search(r'L:([\d.]+)', sensor_str)
-                    if l_match:
-                        sensors['lux'] = float(l_match.group(1))
-                    
-                    # Extract C (co2)
-                    c_match = re.search(r'C:([\d.]+)', sensor_str)
-                    if c_match:
-                        sensors['co2'] = float(c_match.group(1))
-                    
-                    # ⭐ NEW: Extract Node 3 Soil Sensors
-                    # Format: Node3[S1 (Hum:0% pH:0) S2:0% S3:0% S4:0%]
-                    
-                    if 'Node3' in sensor_str:
-                         try:
-                             # Extract only the content inside Node3[...]
-                             # Handle potential variations or multiple brackets if complex
-                             node3_part = sensor_str.split('Node3[')[1].split(']')[0]
-                             
-                             # Node 3 S1 Hum
-                             n3_s1_match = re.search(r'S1\s*\(Hum:([\d.]+)%', node3_part)
-                             if n3_s1_match:
-                                  sensors['node3_s1_hum'] = float(n3_s1_match.group(1))
+            # Total for pagination
+            cur.execute("SELECT COUNT(*) FROM sensors")
+            total = cur.fetchone()[0]
 
-                             # Node 3 S2
-                             n3_s2_match = re.search(r'S2:([\d.]+)%', node3_part)
-                             if n3_s2_match:
-                                  sensors['node3_s2_hum'] = float(n3_s2_match.group(1))
+            # Paginated sensor rows (newest first) with nearest node3 reading
+            cur.execute("""
+                SELECT s.timestamp,
+                       s.air_temp, s.air_hum,
+                       s.soil_1_hum, s.soil_1_ph, s.soil_1_n, s.soil_1_p, s.soil_1_k,
+                       s.soil_2_hum, s.env_lux, s.env_co2,
+                       n3.soil_1 AS n3_s1, n3.soil_2 AS n3_s2,
+                       n3.soil_3 AS n3_s3, n3.soil_4 AS n3_s4,
+                       n3.soil_1_ph AS n3_ph, n3.soil_1_n AS n3_n,
+                       n3.soil_1_p  AS n3_p,  n3.soil_1_k AS n3_k
+                FROM sensors s
+                LEFT JOIN soil_sensors_node3 n3
+                  ON n3.id = (SELECT id FROM soil_sensors_node3
+                              WHERE timestamp <= s.timestamp
+                              ORDER BY timestamp DESC LIMIT 1)
+                ORDER BY s.id DESC
+                LIMIT ? OFFSET ?
+            """, (limit, offset))
+            s_rows = cur.fetchall()
 
-                             # Node 3 S3
-                             n3_s3_match = re.search(r'S3:([\d.]+)%', node3_part)
-                             if n3_s3_match:
-                                  sensors['node3_s3_hum'] = float(n3_s3_match.group(1))
+            sensor_data = []
+            for r in s_rows:
+                sensor_data.append({
+                    'timestamp': r['timestamp'],
+                    'type': 'sensor',
+                    '_fresh': True,
+                    'data': {
+                        'temp': r['air_temp'], 'humidity': r['air_hum'],
+                        'lux':  r['env_lux'],  'co2': r['env_co2'],
+                        'soil_1': r['soil_1_hum'], 'soil_2': r['soil_2_hum'],
+                        'soil_1_ph': r['soil_1_ph'], 'soil_1_n': r['soil_1_n'],
+                        'soil_1_p':  r['soil_1_p'],  'soil_1_k': r['soil_1_k'],
+                        'node3_s1_hum': r['n3_s1'], 'node3_s2_hum': r['n3_s2'],
+                        'node3_s3_hum': r['n3_s3'], 'node3_s4_hum': r['n3_s4'],
+                        'node3_s1_ph':  r['n3_ph'],  'node3_s1_n': r['n3_n'],
+                        'node3_s1_p':   r['n3_p'],   'node3_s1_k': r['n3_k'],
+                    }
+                })
 
-                             # Node 3 S4
-                             n3_s4_match = re.search(r'S4:([\d.]+)%', node3_part)
-                             if n3_s4_match:
-                                  sensors['node3_s4_hum'] = float(n3_s4_match.group(1))
-                         except IndexError:
-                             pass # Malformed Node3 block
+            # ── Build relay snapshot for every sensor row ──────────────────
+            # relay_history only records state CHANGES, so we replay the
+            # timeline to get the state at each sensor timestamp.
+            relay_data = []
+            if s_rows:
+                ts_oldest = s_rows[-1]['timestamp']
+                ts_newest = s_rows[0]['timestamp']
 
-                    data.append({
-                        'timestamp': current_timestamp,
-                        'type': 'sensor',
-                        'data': sensors
-                    })
-                
-                elif 'Pump:' in parts[1]:
-                    # Relay line - may span multiple parts due to line wrapping
-                    relay_str = ' '.join(parts[1:])  # Join all parts after timestamp
-                    relays = {}
-                    relay_names = ['Pump', 'Fan', 'Lamp', 'Mist', 'Plot Pump 2', 'EvapPump', 'V1-P1', 'V2-P1', 'V3-P1', 'V1-P2', 'V2-P2', 'V3-P2']
-                    
-                    for relay_name in relay_names:
-                        pattern = f'{relay_name}:([A-Z]+)/([A-Z]+)'
-                        match = re.search(pattern, relay_str)
-                        if match:
-                            relays[relay_name] = {
-                                'state': match.group(1),
-                                'mode': match.group(2)
-                            }
-                    
-                    data.append({
-                        'timestamp': current_timestamp,
+                # 1. Seed: state of each relay just before the oldest row in page
+                cur.execute("""
+                    SELECT relay_index, state, mode FROM relay_history
+                    WHERE id IN (
+                        SELECT MAX(id) FROM relay_history
+                        WHERE timestamp <= ?
+                        GROUP BY relay_index
+                    )
+                """, (ts_oldest,))
+                snapshot = {}
+                for ev in cur.fetchall():
+                    name = _RELAY_IDX_NAME.get(ev['relay_index'])
+                    if name:
+                        snapshot[name] = {'state': 'ON' if ev['state'] else 'OFF',
+                                          'mode': ev['mode'] or 'MANUAL'}
+
+                # 2. Get all relay changes within the page window (ascending)
+                cur.execute("""
+                    SELECT timestamp, relay_index, state, mode FROM relay_history
+                    WHERE timestamp BETWEEN ? AND ?
+                    ORDER BY timestamp ASC, id ASC
+                """, (ts_oldest, ts_newest))
+                changes = [(r['timestamp'], r['relay_index'], r['state'], r['mode'])
+                           for r in cur.fetchall()]
+                change_idx = 0
+                n_changes  = len(changes)
+
+                # 3. Walk sensor rows ascending, apply relay changes as we go
+                for sr in reversed(s_rows):   # reversed = ascending order
+                    while change_idx < n_changes and changes[change_idx][0] <= sr['timestamp']:
+                        _, ridx, st, md = changes[change_idx]
+                        rname = _RELAY_IDX_NAME.get(ridx)
+                        if rname:
+                            snapshot[rname] = {'state': 'ON' if st else 'OFF',
+                                               'mode': md or 'MANUAL'}
+                        change_idx += 1
+                    relay_data.append({
+                        'timestamp': sr['timestamp'],
                         'type': 'relay',
-                        'data': relays
+                        '_fresh': True,
+                        'data': dict(snapshot)   # copy of state at this moment
                     })
-            
-            except Exception as e:
-                logger.warning(f"⚠️ Failed to parse line: {line[:50]}... Error: {e}")
-                continue
-        
-        # Reverse to get latest first
-        data.reverse()
-        
-        # Apply pagination
-        total = len(data)
-        paginated = data[offset:offset + limit]
-        
-        return jsonify({
-            'status': 'success',
-            'total': total,
-            'offset': offset,
-            'limit': limit,
-            'data': paginated
-        })
-    
+
+            all_data = sorted(sensor_data + relay_data,
+                              key=lambda x: x['timestamp'], reverse=True)
+            return jsonify({'status': 'success', 'data': all_data,
+                            'total': total, 'offset': offset, 'limit': limit})
+
     except Exception as e:
-        logger.error(f"❌ Error reading backup data: {e}")
-        return jsonify({
-            'status': 'error',
-            'message': str(e)
-        }), 500
+        logger.error(f"❌ backup-data DB error: {e}")
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
 
 @app.route('/api/backup-data/monthly', methods=['GET'])
 def get_monthly_data():
-    """Get last 4 weeks of data grouped by week (1 record per week per type)"""
+    """Last 4 weeks grouped by week from SQLite"""
     try:
-        import re
-        from datetime import datetime, timedelta
+        cutoff = (datetime.now(BANGKOK_TZ) - timedelta(weeks=4)).strftime('%Y-%m-%d %H:%M:%S')
+        with sqlite3.connect(DB_NAME) as conn:
+            conn.row_factory = sqlite3.Row
+            cur = conn.cursor()
+            cur.execute("""
+                SELECT strftime('%Y-W%W', timestamp) AS week,
+                       strftime('%Y-%m-%d', MIN(timestamp)) AS week_start,
+                       MAX(timestamp) AS rep_ts,
+                       AVG(air_temp) AS temp,  AVG(air_hum) AS humidity,
+                       AVG(env_lux)  AS lux,   AVG(env_co2) AS co2,
+                       AVG(soil_1_hum) AS soil_1, AVG(soil_2_hum) AS soil_2,
+                       AVG(soil_1_ph) AS soil_1_ph, AVG(soil_1_n) AS soil_1_n,
+                       AVG(soil_1_p)  AS soil_1_p,  AVG(soil_1_k) AS soil_1_k
+                FROM sensors
+                WHERE timestamp >= ?
+                GROUP BY week
+                ORDER BY week ASC
+            """, (cutoff,))
+            s_rows = cur.fetchall()
 
-        backup_file = os.path.join(os.path.dirname(SCRIPT_DIR), "Database", "DATABASE_BACKUP.txt")
+            data = []
+            for r in s_rows:
+                cur.execute("""
+                    SELECT soil_1, soil_2, soil_3, soil_4,
+                           soil_1_ph, soil_1_n, soil_1_p, soil_1_k
+                    FROM soil_sensors_node3
+                    WHERE timestamp <= ? ORDER BY timestamp DESC LIMIT 1
+                """, (r['rep_ts'],))
+                n3 = cur.fetchone()
+                data.append({
+                    'timestamp': r['week_start'], 'week_key': r['week'],
+                    'type': 'sensor', '_fresh': True,
+                    'data': {
+                        'temp': r['temp'], 'humidity': r['humidity'],
+                        'lux':  r['lux'],  'co2': r['co2'],
+                        'soil_1': r['soil_1'], 'soil_2': r['soil_2'],
+                        'soil_1_ph': r['soil_1_ph'], 'soil_1_n': r['soil_1_n'],
+                        'soil_1_p':  r['soil_1_p'],  'soil_1_k': r['soil_1_k'],
+                        **_n3_dict(n3)
+                    }
+                })
+                data.append({
+                    'timestamp': r['week_start'], 'week_key': r['week'],
+                    'type': 'relay', '_fresh': True,
+                    'data': _relay_snapshot_at(cur, r['rep_ts'])
+                })
 
-        if not os.path.exists(backup_file):
-            return jsonify({'status': 'success', 'data': [], 'total': 0}), 200
-
-        with open(backup_file, 'r', encoding='utf-8') as f:
-            lines = f.readlines()
-
-        now = datetime.now()
-        cutoff_time = now - timedelta(weeks=4)
-
-        week_map = {}  # key: "YYYY-Www-type"
-        last_valid_timestamp = None
-
-        for line in lines:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                parts = line.split(' | ')
-                if len(parts) < 2:
-                    continue
-
-                timestamp_part = parts[0].strip()
-                if timestamp_part and len(timestamp_part) > 10:
-                    current_timestamp = timestamp_part
-                    last_valid_timestamp = current_timestamp
-                else:
-                    if last_valid_timestamp:
-                        current_timestamp = last_valid_timestamp
-                    else:
-                        continue
-
-                try:
-                    row_time = datetime.strptime(current_timestamp[:19], '%Y-%m-%d %H:%M:%S')
-                except ValueError:
-                    continue
-
-                if row_time < cutoff_time:
-                    continue
-
-                # ISO week key e.g. "2026-W08"
-                week_key = row_time.strftime('%Y-W%W')
-                # Representative date = start of that week (Monday)
-                day_label = row_time.strftime('%Y-%m-%d')
-
-                if 'T:' in parts[1] and 'H:' in parts[1]:
-                    sensor_str = parts[1]
-                    sensors = {}
-
-                    t_match = re.search(r'T:([\.\d]+)', sensor_str)
-                    if t_match: sensors['temp'] = float(t_match.group(1))
-                    h_match = re.search(r'H:([\.\d]+)', sensor_str)
-                    if h_match: sensors['humidity'] = float(h_match.group(1))
-
-                    s1_complex_match = re.search(r'Soil1\(H:([\d.]+)', sensor_str)
-                    if s1_complex_match:
-                        sensors['soil_1'] = float(s1_complex_match.group(1))
-                        try:
-                            soil1_content = sensor_str.split('Soil1(')[1].split(')')[0]
-                            ph_match = re.search(r'pH:([\d.]+)', soil1_content)
-                            if ph_match: sensors['soil_1_ph'] = float(ph_match.group(1))
-                            n_match = re.search(r'N:([\d.]+)', soil1_content)
-                            if n_match: sensors['soil_1_n'] = float(n_match.group(1))
-                            p_match = re.search(r'P:([\d.]+)', soil1_content)
-                            if p_match: sensors['soil_1_p'] = float(p_match.group(1))
-                            k_match = re.search(r'K:([\d.]+)', soil1_content)
-                            if k_match: sensors['soil_1_k'] = float(k_match.group(1))
-                        except IndexError:
-                            pass
-                    elif 'Soil1:' in sensor_str:
-                        s1_match = re.search(r'Soil1:([\d.]+)', sensor_str)
-                        if s1_match: sensors['soil_1'] = float(s1_match.group(1))
-                    elif 'S1:' in sensor_str:
-                        s1_match = re.search(r'S1:([\d.]+)', sensor_str)
-                        if s1_match: sensors['soil_1'] = float(s1_match.group(1))
-
-                    s2_match = re.search(r'Soil2:([\d.]+)', sensor_str)
-                    if s2_match:
-                        sensors['soil_2'] = float(s2_match.group(1))
-                    elif 'S2:' in sensor_str and 'Node3' not in sensor_str:
-                        s2_match = re.search(r'S2:([\d.]+)', sensor_str)
-                        if s2_match: sensors['soil_2'] = float(s2_match.group(1))
-
-                    l_match = re.search(r'L:([\d.]+)', sensor_str)
-                    if l_match: sensors['lux'] = float(l_match.group(1))
-                    c_match = re.search(r'C:([\d.]+)', sensor_str)
-                    if c_match: sensors['co2'] = float(c_match.group(1))
-
-                    if 'Node3' in sensor_str:
-                        try:
-                            node3_part = sensor_str.split('Node3[')[1].split(']')[0]
-                            n3_s1_match = re.search(r'S1\s*\(Hum:([\d.]+)%', node3_part)
-                            if n3_s1_match: sensors['node3_s1_hum'] = float(n3_s1_match.group(1))
-                            n3_s1_ph_match = re.search(r'pH:([\d.]+)', node3_part)
-                            if n3_s1_ph_match: sensors['node3_s1_ph'] = float(n3_s1_ph_match.group(1))
-                            n3_s2_match = re.search(r'S2:([\d.]+)%', node3_part)
-                            if n3_s2_match: sensors['node3_s2_hum'] = float(n3_s2_match.group(1))
-                            n3_s3_match = re.search(r'S3:([\d.]+)%', node3_part)
-                            if n3_s3_match: sensors['node3_s3_hum'] = float(n3_s3_match.group(1))
-                            n3_s4_match = re.search(r'S4:([\d.]+)%', node3_part)
-                            if n3_s4_match: sensors['node3_s4_hum'] = float(n3_s4_match.group(1))
-                        except IndexError:
-                            pass
-
-                    week_map[f"{week_key}-sensor"] = {'timestamp': day_label, 'week_key': week_key, 'type': 'sensor', 'data': sensors}
-
-                elif 'Pump:' in parts[1]:
-                    relay_str = ' '.join(parts[1:])
-                    relays = {}
-                    relay_names = ['Pump', 'Fan', 'Lamp', 'Mist', 'Plot Pump 2', 'EvapPump',
-                                   'V1-P1', 'V2-P1', 'V3-P1', 'V1-P2', 'V2-P2', 'V3-P2']
-                    for relay_name in relay_names:
-                        pattern = f'{relay_name}:([A-Z]+)/([A-Z]+)'
-                        match = re.search(pattern, relay_str)
-                        if match:
-                            relays[relay_name] = {'state': match.group(1), 'mode': match.group(2)}
-
-                    week_map[f"{week_key}-relay"] = {'timestamp': day_label, 'week_key': week_key, 'type': 'relay', 'data': relays}
-
-            except Exception:
-                continue
-
-        result = sorted(week_map.values(), key=lambda x: x['week_key'])
-        sensors = [r for r in result if r['type'] == 'sensor'][-4:]
-        relays  = [r for r in result if r['type'] == 'relay'][-4:]
-        final = sorted(sensors + relays, key=lambda x: (x['week_key'], x['type']))
-
-        return jsonify({'status': 'success', 'data': final, 'total': len(final)})
+            return jsonify({'status': 'success', 'data': data, 'total': len(data)})
 
     except Exception as e:
-        logger.error(f"❌ Error reading monthly data: {e}")
+        logger.error(f"❌ monthly DB error: {e}")
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 
 @app.route('/api/backup-data/weekly', methods=['GET'])
 def get_weekly_data():
-    """Get last 7 days of data grouped by day (1 record per day per type)"""
+    """Last 7 days grouped by day from SQLite"""
     try:
-        import re
-        from datetime import datetime, timedelta
+        cutoff = (datetime.now(BANGKOK_TZ) - timedelta(days=7)).strftime('%Y-%m-%d %H:%M:%S')
+        with sqlite3.connect(DB_NAME) as conn:
+            conn.row_factory = sqlite3.Row
+            cur = conn.cursor()
+            cur.execute("""
+                SELECT strftime('%Y-%m-%d', timestamp) AS day,
+                       MAX(timestamp) AS rep_ts,
+                       AVG(air_temp) AS temp,  AVG(air_hum) AS humidity,
+                       AVG(env_lux)  AS lux,   AVG(env_co2) AS co2,
+                       AVG(soil_1_hum) AS soil_1, AVG(soil_2_hum) AS soil_2,
+                       AVG(soil_1_ph) AS soil_1_ph, AVG(soil_1_n) AS soil_1_n,
+                       AVG(soil_1_p)  AS soil_1_p,  AVG(soil_1_k) AS soil_1_k
+                FROM sensors
+                WHERE timestamp >= ?
+                GROUP BY day
+                ORDER BY day ASC
+            """, (cutoff,))
+            s_rows = cur.fetchall()
 
-        backup_file = os.path.join(os.path.dirname(SCRIPT_DIR), "Database", "DATABASE_BACKUP.txt")
+            data = []
+            for r in s_rows:
+                cur.execute("""
+                    SELECT soil_1, soil_2, soil_3, soil_4,
+                           soil_1_ph, soil_1_n, soil_1_p, soil_1_k
+                    FROM soil_sensors_node3
+                    WHERE timestamp <= ? ORDER BY timestamp DESC LIMIT 1
+                """, (r['rep_ts'],))
+                n3 = cur.fetchone()
+                data.append({
+                    'timestamp': r['day'],
+                    'type': 'sensor', '_fresh': True,
+                    'data': {
+                        'temp': r['temp'], 'humidity': r['humidity'],
+                        'lux':  r['lux'],  'co2': r['co2'],
+                        'soil_1': r['soil_1'], 'soil_2': r['soil_2'],
+                        'soil_1_ph': r['soil_1_ph'], 'soil_1_n': r['soil_1_n'],
+                        'soil_1_p':  r['soil_1_p'],  'soil_1_k': r['soil_1_k'],
+                        **_n3_dict(n3)
+                    }
+                })
+                data.append({
+                    'timestamp': r['day'],
+                    'type': 'relay', '_fresh': True,
+                    'data': _relay_snapshot_at(cur, r['rep_ts'])
+                })
 
-        if not os.path.exists(backup_file):
-            return jsonify({'status': 'success', 'data': [], 'total': 0}), 200
-
-        with open(backup_file, 'r', encoding='utf-8') as f:
-            lines = f.readlines()
-
-        now = datetime.now()
-        cutoff_time = now - timedelta(days=7)
-
-        day_map = {}  # key: "YYYY-MM-DD-type"
-        last_valid_timestamp = None
-
-        for line in lines:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                parts = line.split(' | ')
-                if len(parts) < 2:
-                    continue
-
-                timestamp_part = parts[0].strip()
-                if timestamp_part and len(timestamp_part) > 10:
-                    current_timestamp = timestamp_part
-                    last_valid_timestamp = current_timestamp
-                else:
-                    if last_valid_timestamp:
-                        current_timestamp = last_valid_timestamp
-                    else:
-                        continue
-
-                try:
-                    row_time = datetime.strptime(current_timestamp[:19], '%Y-%m-%d %H:%M:%S')
-                except ValueError:
-                    continue
-
-                if row_time < cutoff_time:
-                    continue
-
-                day_key = row_time.strftime('%Y-%m-%d')
-
-                if 'T:' in parts[1] and 'H:' in parts[1]:
-                    sensor_str = parts[1]
-                    sensors = {}
-
-                    t_match = re.search(r'T:([\d.]+)', sensor_str)
-                    if t_match: sensors['temp'] = float(t_match.group(1))
-                    h_match = re.search(r'H:([\d.]+)', sensor_str)
-                    if h_match: sensors['humidity'] = float(h_match.group(1))
-
-                    s1_complex_match = re.search(r'Soil1\(H:([\d.]+)', sensor_str)
-                    if s1_complex_match:
-                        sensors['soil_1'] = float(s1_complex_match.group(1))
-                        try:
-                            soil1_content = sensor_str.split('Soil1(')[1].split(')')[0]
-                            ph_match = re.search(r'pH:([\d.]+)', soil1_content)
-                            if ph_match: sensors['soil_1_ph'] = float(ph_match.group(1))
-                            n_match = re.search(r'N:([\d.]+)', soil1_content)
-                            if n_match: sensors['soil_1_n'] = float(n_match.group(1))
-                            p_match = re.search(r'P:([\d.]+)', soil1_content)
-                            if p_match: sensors['soil_1_p'] = float(p_match.group(1))
-                            k_match = re.search(r'K:([\d.]+)', soil1_content)
-                            if k_match: sensors['soil_1_k'] = float(k_match.group(1))
-                        except IndexError:
-                            pass
-                    elif 'Soil1:' in sensor_str:
-                        s1_match = re.search(r'Soil1:([\d.]+)', sensor_str)
-                        if s1_match: sensors['soil_1'] = float(s1_match.group(1))
-                    elif 'S1:' in sensor_str:
-                        s1_match = re.search(r'S1:([\d.]+)', sensor_str)
-                        if s1_match: sensors['soil_1'] = float(s1_match.group(1))
-
-                    s2_match = re.search(r'Soil2:([\d.]+)', sensor_str)
-                    if s2_match:
-                        sensors['soil_2'] = float(s2_match.group(1))
-                    elif 'S2:' in sensor_str and 'Node3' not in sensor_str:
-                        s2_match = re.search(r'S2:([\d.]+)', sensor_str)
-                        if s2_match: sensors['soil_2'] = float(s2_match.group(1))
-
-                    l_match = re.search(r'L:([\d.]+)', sensor_str)
-                    if l_match: sensors['lux'] = float(l_match.group(1))
-                    c_match = re.search(r'C:([\d.]+)', sensor_str)
-                    if c_match: sensors['co2'] = float(c_match.group(1))
-
-                    if 'Node3' in sensor_str:
-                        try:
-                            node3_part = sensor_str.split('Node3[')[1].split(']')[0]
-                            n3_s1_match = re.search(r'S1\s*\(Hum:([\d.]+)%', node3_part)
-                            if n3_s1_match: sensors['node3_s1_hum'] = float(n3_s1_match.group(1))
-                            n3_s1_ph_match = re.search(r'pH:([\d.]+)', node3_part)
-                            if n3_s1_ph_match: sensors['node3_s1_ph'] = float(n3_s1_ph_match.group(1))
-                            n3_s2_match = re.search(r'S2:([\d.]+)%', node3_part)
-                            if n3_s2_match: sensors['node3_s2_hum'] = float(n3_s2_match.group(1))
-                            n3_s3_match = re.search(r'S3:([\d.]+)%', node3_part)
-                            if n3_s3_match: sensors['node3_s3_hum'] = float(n3_s3_match.group(1))
-                            n3_s4_match = re.search(r'S4:([\d.]+)%', node3_part)
-                            if n3_s4_match: sensors['node3_s4_hum'] = float(n3_s4_match.group(1))
-                        except IndexError:
-                            pass
-
-                    # Always overwrite to keep the LAST reading of the day
-                    day_map[f"{day_key}-sensor"] = {'timestamp': day_key, 'type': 'sensor', 'data': sensors}
-
-                elif 'Pump:' in parts[1]:
-                    relay_str = ' '.join(parts[1:])
-                    relays = {}
-                    relay_names = ['Pump', 'Fan', 'Lamp', 'Mist', 'Plot Pump 2', 'EvapPump',
-                                   'V1-P1', 'V2-P1', 'V3-P1', 'V1-P2', 'V2-P2', 'V3-P2']
-                    for relay_name in relay_names:
-                        pattern = f'{relay_name}:([A-Z]+)/([A-Z]+)'
-                        match = re.search(pattern, relay_str)
-                        if match:
-                            relays[relay_name] = {'state': match.group(1), 'mode': match.group(2)}
-
-                    day_map[f"{day_key}-relay"] = {'timestamp': day_key, 'type': 'relay', 'data': relays}
-
-            except Exception:
-                continue
-
-        result = sorted(day_map.values(), key=lambda x: x['timestamp'])
-        # Keep at most last 7 days per type
-        sensors = [r for r in result if r['type'] == 'sensor'][-7:]
-        relays  = [r for r in result if r['type'] == 'relay'][-7:]
-        final = sorted(sensors + relays, key=lambda x: (x['timestamp'], x['type']))
-
-        return jsonify({'status': 'success', 'data': final, 'total': len(final)})
+            return jsonify({'status': 'success', 'data': data, 'total': len(data)})
 
     except Exception as e:
-        logger.error(f"❌ Error reading weekly data: {e}")
+        logger.error(f"❌ weekly DB error: {e}")
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 
 @app.route('/api/backup-data/hourly', methods=['GET'])
 def get_hourly_data():
-    """Get last 24 hours of data grouped by hour (1 record per hour per type)"""
+    """Last 24h grouped by hour from SQLite"""
     try:
-        import re
-        from datetime import datetime, timedelta
+        cutoff = (datetime.now(BANGKOK_TZ) - timedelta(hours=24)).strftime('%Y-%m-%d %H:%M:%S')
+        with sqlite3.connect(DB_NAME) as conn:
+            conn.row_factory = sqlite3.Row
+            cur = conn.cursor()
+            cur.execute("""
+                SELECT strftime('%Y-%m-%d %H:00', timestamp) AS hour,
+                       MAX(timestamp) AS rep_ts,
+                       AVG(air_temp) AS temp,  AVG(air_hum) AS humidity,
+                       AVG(env_lux)  AS lux,   AVG(env_co2) AS co2,
+                       AVG(soil_1_hum) AS soil_1, AVG(soil_2_hum) AS soil_2,
+                       AVG(soil_1_ph) AS soil_1_ph, AVG(soil_1_n) AS soil_1_n,
+                       AVG(soil_1_p)  AS soil_1_p,  AVG(soil_1_k) AS soil_1_k
+                FROM sensors
+                WHERE timestamp >= ?
+                GROUP BY hour
+                ORDER BY hour ASC
+            """, (cutoff,))
+            s_rows = cur.fetchall()
 
-        backup_file = os.path.join(os.path.dirname(SCRIPT_DIR), "Database", "DATABASE_BACKUP.txt")
+            data = []
+            for r in s_rows:
+                cur.execute("""
+                    SELECT soil_1, soil_2, soil_3, soil_4,
+                           soil_1_ph, soil_1_n, soil_1_p, soil_1_k
+                    FROM soil_sensors_node3
+                    WHERE timestamp <= ? ORDER BY timestamp DESC LIMIT 1
+                """, (r['rep_ts'],))
+                n3 = cur.fetchone()
+                data.append({
+                    'timestamp': r['hour'],
+                    'type': 'sensor', '_fresh': True,
+                    'data': {
+                        'temp': r['temp'], 'humidity': r['humidity'],
+                        'lux':  r['lux'],  'co2': r['co2'],
+                        'soil_1': r['soil_1'], 'soil_2': r['soil_2'],
+                        'soil_1_ph': r['soil_1_ph'], 'soil_1_n': r['soil_1_n'],
+                        'soil_1_p':  r['soil_1_p'],  'soil_1_k': r['soil_1_k'],
+                        **_n3_dict(n3)
+                    }
+                })
+                data.append({
+                    'timestamp': r['hour'],
+                    'type': 'relay', '_fresh': True,
+                    'data': _relay_snapshot_at(cur, r['rep_ts'])
+                })
 
-        if not os.path.exists(backup_file):
-            return jsonify({'status': 'success', 'data': [], 'total': 0}), 200
-
-        with open(backup_file, 'r', encoding='utf-8') as f:
-            lines = f.readlines()
-
-        now = datetime.now()
-        cutoff_time = now - timedelta(hours=24)
-
-        hour_map = {}  # key: "YYYY-MM-DD HH:00-type"
-        last_valid_timestamp = None
-
-        for line in lines:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                parts = line.split(' | ')
-                if len(parts) < 2:
-                    continue
-
-                timestamp_part = parts[0].strip()
-                if timestamp_part and len(timestamp_part) > 10:
-                    current_timestamp = timestamp_part
-                    last_valid_timestamp = current_timestamp
-                else:
-                    if last_valid_timestamp:
-                        current_timestamp = last_valid_timestamp
-                    else:
-                        continue
-
-                try:
-                    row_time = datetime.strptime(current_timestamp[:19], '%Y-%m-%d %H:%M:%S')
-                except ValueError:
-                    continue
-
-                if row_time < cutoff_time:
-                    continue
-
-                hour_key = row_time.strftime('%Y-%m-%d %H:00')
-
-                if 'T:' in parts[1] and 'H:' in parts[1]:
-                    sensor_str = parts[1]
-                    sensors = {}
-
-                    t_match = re.search(r'T:([\d.]+)', sensor_str)
-                    if t_match: sensors['temp'] = float(t_match.group(1))
-
-                    h_match = re.search(r'H:([\d.]+)', sensor_str)
-                    if h_match: sensors['humidity'] = float(h_match.group(1))
-
-                    s1_complex_match = re.search(r'Soil1\(H:([\d.]+)', sensor_str)
-                    if s1_complex_match:
-                        sensors['soil_1'] = float(s1_complex_match.group(1))
-                        try:
-                            soil1_content = sensor_str.split('Soil1(')[1].split(')')[0]
-                            ph_match = re.search(r'pH:([\d.]+)', soil1_content)
-                            if ph_match: sensors['soil_1_ph'] = float(ph_match.group(1))
-                            n_match = re.search(r'N:([\d.]+)', soil1_content)
-                            if n_match: sensors['soil_1_n'] = float(n_match.group(1))
-                            p_match = re.search(r'P:([\d.]+)', soil1_content)
-                            if p_match: sensors['soil_1_p'] = float(p_match.group(1))
-                            k_match = re.search(r'K:([\d.]+)', soil1_content)
-                            if k_match: sensors['soil_1_k'] = float(k_match.group(1))
-                        except IndexError:
-                            pass
-                    elif 'Soil1:' in sensor_str:
-                        s1_match = re.search(r'Soil1:([\d.]+)', sensor_str)
-                        if s1_match: sensors['soil_1'] = float(s1_match.group(1))
-                    elif 'S1:' in sensor_str:
-                        s1_match = re.search(r'S1:([\d.]+)', sensor_str)
-                        if s1_match: sensors['soil_1'] = float(s1_match.group(1))
-
-                    s2_match = re.search(r'Soil2:([\d.]+)', sensor_str)
-                    if s2_match:
-                        sensors['soil_2'] = float(s2_match.group(1))
-                    elif 'S2:' in sensor_str and 'Node3' not in sensor_str:
-                        s2_match = re.search(r'S2:([\d.]+)', sensor_str)
-                        if s2_match: sensors['soil_2'] = float(s2_match.group(1))
-
-                    l_match = re.search(r'L:([\d.]+)', sensor_str)
-                    if l_match: sensors['lux'] = float(l_match.group(1))
-
-                    c_match = re.search(r'C:([\d.]+)', sensor_str)
-                    if c_match: sensors['co2'] = float(c_match.group(1))
-
-                    if 'Node3' in sensor_str:
-                        try:
-                            node3_part = sensor_str.split('Node3[')[1].split(']')[0]
-                            n3_s1_match = re.search(r'S1\s*\(Hum:([\d.]+)%', node3_part)
-                            if n3_s1_match: sensors['node3_s1_hum'] = float(n3_s1_match.group(1))
-                            n3_s1_ph_match = re.search(r'pH:([\d.]+)', node3_part)
-                            if n3_s1_ph_match: sensors['node3_s1_ph'] = float(n3_s1_ph_match.group(1))
-                            n3_s2_match = re.search(r'S2:([\d.]+)%', node3_part)
-                            if n3_s2_match: sensors['node3_s2_hum'] = float(n3_s2_match.group(1))
-                            n3_s3_match = re.search(r'S3:([\d.]+)%', node3_part)
-                            if n3_s3_match: sensors['node3_s3_hum'] = float(n3_s3_match.group(1))
-                            n3_s4_match = re.search(r'S4:([\d.]+)%', node3_part)
-                            if n3_s4_match: sensors['node3_s4_hum'] = float(n3_s4_match.group(1))
-                        except IndexError:
-                            pass
-
-                    type_key = f"{hour_key}-sensor"
-                    hour_map[type_key] = {'timestamp': hour_key, 'type': 'sensor', 'data': sensors}
-
-                elif 'Pump:' in parts[1]:
-                    relay_str = ' '.join(parts[1:])
-                    relays = {}
-                    relay_names = ['Pump', 'Fan', 'Lamp', 'Mist', 'Plot Pump 2', 'EvapPump',
-                                   'V1-P1', 'V2-P1', 'V3-P1', 'V1-P2', 'V2-P2', 'V3-P2']
-                    for relay_name in relay_names:
-                        pattern = f'{relay_name}:([A-Z]+)/([A-Z]+)'
-                        match = re.search(pattern, relay_str)
-                        if match:
-                            relays[relay_name] = {'state': match.group(1), 'mode': match.group(2)}
-
-                    type_key = f"{hour_key}-relay"
-                    hour_map[type_key] = {'timestamp': hour_key, 'type': 'relay', 'data': relays}
-
-            except Exception:
-                continue
-
-        result = sorted(hour_map.values(), key=lambda x: x['timestamp'])
-
-        return jsonify({'status': 'success', 'data': result, 'total': len(result)})
+            return jsonify({'status': 'success', 'data': data, 'total': len(data)})
 
     except Exception as e:
-        logger.error(f"❌ Error reading hourly data: {e}")
+        logger.error(f"❌ hourly DB error: {e}")
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 
@@ -2514,8 +2398,11 @@ if __name__ == '__main__':
     mock_publisher_thread = threading.Thread(target=continuous_mock_sensor_publisher, daemon=True)
     mock_publisher_thread.start()
     logger.info("🤖 Continuous mock sensor publisher started (until Node1 connects)")
-    
-    # 6. Run Flask-SocketIO server
+
+    # 6. Start DB auto-trim (keeps last 30 days, runs daily)
+    _start_db_auto_trim()
+
+    # 7. Run Flask-SocketIO server
     logger.info(f"🌐 Server starting on {SERVER_IP}:{SERVER_PORT}...")
     socketio.run(
         app,

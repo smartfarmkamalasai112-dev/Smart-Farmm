@@ -10,7 +10,9 @@ import {
   ResponsiveContainer
 } from 'recharts';
 
-export default function GraphPage() {
+const API_URL = `http://${window.location.hostname}:5000`;
+
+export default function GraphPage({ espConnected = true }) {
   const [data, setData] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
@@ -25,42 +27,46 @@ export default function GraphPage() {
   const [monthlyLoading, setMonthlyLoading] = useState(false);
 
   useEffect(() => {
+    if (!espConnected) { setData([]); setLoading(false); return; }
     fetchData();
     const interval = setInterval(fetchData, 60000); // Auto-refresh every 1 minute
     return () => clearInterval(interval);
-  }, [limit]);
+  }, [limit, espConnected]);
 
   // Fetch hourly data from dedicated endpoint whenever in daily mode
   useEffect(() => {
+    if (!espConnected) { setHourlyData([]); return; }
     if (filterMode === 'daily') {
       fetchHourlyData();
       const interval = setInterval(fetchHourlyData, 60000);
       return () => clearInterval(interval);
     }
-  }, [filterMode]);
+  }, [filterMode, espConnected]);
 
   // Fetch weekly data from dedicated endpoint whenever in weekly mode
   useEffect(() => {
+    if (!espConnected) { setWeeklyData([]); return; }
     if (filterMode === 'weekly') {
       fetchWeeklyData();
       const interval = setInterval(fetchWeeklyData, 60000);
       return () => clearInterval(interval);
     }
-  }, [filterMode]);
+  }, [filterMode, espConnected]);
 
   // Fetch monthly data from dedicated endpoint whenever in monthly mode
   useEffect(() => {
+    if (!espConnected) { setMonthlyData([]); return; }
     if (filterMode === 'monthly') {
       fetchMonthlyData();
       const interval = setInterval(fetchMonthlyData, 60000);
       return () => clearInterval(interval);
     }
-  }, [filterMode]);
+  }, [filterMode, espConnected]);
 
   const fetchHourlyData = async () => {
     try {
       setHourlyLoading(true);
-      const response = await fetch(`http://localhost:5000/api/backup-data/hourly`);
+      const response = await fetch(`${API_URL}/api/backup-data/hourly`);
       const result = await response.json();
       if (result.status === 'success') {
         const sorted = [...result.data].sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
@@ -78,7 +84,7 @@ export default function GraphPage() {
   const fetchWeeklyData = async () => {
     try {
       setWeeklyLoading(true);
-      const response = await fetch(`http://localhost:5000/api/backup-data/weekly`);
+      const response = await fetch(`${API_URL}/api/backup-data/weekly`);
       const result = await response.json();
       if (result.status === 'success') {
         const sorted = [...result.data].sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
@@ -98,7 +104,7 @@ export default function GraphPage() {
       setLoading(true);
       setError(null);
       const response = await fetch(
-        `http://localhost:5000/api/backup-data?limit=${limit}&offset=0`
+        `${API_URL}/api/backup-data?limit=${limit}&offset=0`
       );
       const result = await response.json();
       
@@ -119,7 +125,7 @@ export default function GraphPage() {
   const fetchMonthlyData = async () => {
     try {
       setMonthlyLoading(true);
-      const response = await fetch(`http://localhost:5000/api/backup-data/monthly`);
+      const response = await fetch(`${API_URL}/api/backup-data/monthly`);
       const result = await response.json();
       if (result.status === 'success') {
         const sorted = [...result.data].sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
@@ -135,21 +141,37 @@ export default function GraphPage() {
   };
 
   const prepareSensorChartData = () => {
+    if (!espConnected) {
+      return [{ name: '–', temp: 0, humidity: 0, lux: 0, co2: 0, soil_1: 0, soil_2: 0, node3_s2_hum: 0, node3_s1_hum: 0, node3_s3_hum: 0, node3_s4_hum: 0 }];
+    }
     const chartData = filterMode === 'daily' ? hourlyData :
                       filterMode === 'weekly' ? weeklyData :
                       monthlyData;
-    
+
     const sensorEntries = chartData.filter(d => d.type === 'sensor');
-    
-    return sensorEntries.map(entry => ({
-      name: entry.timestamp,
-      temp: entry.data.temp || 0,
-      humidity: entry.data.humidity || 0,
-      soil_1: entry.data.soil_1 || 0,
-      soil_2: entry.data.soil_2 || 0,
-      lux: entry.data.lux || 0,
-      co2: entry.data.co2 || 0
-    }));
+
+    return sensorEntries.map(entry => {
+      // _fresh === false → stale (no [FRESH] marker in backup) → null creates a gap in the chart
+      // _fresh === undefined → old data, marker not yet present → treat as real
+      const isFresh = entry._fresh !== false;
+      const val = (v) => isFresh ? (v ?? null) : null;
+      return {
+        name: entry.timestamp,
+        // Zone ENV
+        temp:         val(entry.data.temp),
+        humidity:     val(entry.data.humidity),
+        lux:          val(entry.data.lux),
+        co2:          val(entry.data.co2),
+        // Zone แปลง 1
+        soil_1:       val(entry.data.soil_1),
+        soil_2:       val(entry.data.soil_2),
+        node3_s2_hum: val(entry.data.node3_s2_hum),
+        // Zone แปลง 2
+        node3_s1_hum: val(entry.data.node3_s1_hum),
+        node3_s3_hum: val(entry.data.node3_s3_hum),
+        node3_s4_hum: val(entry.data.node3_s4_hum),
+      };
+    });
   };
 
   const sensorChartData = prepareSensorChartData();
@@ -218,17 +240,30 @@ export default function GraphPage() {
       fontFamily: 'Arial, sans-serif'
     },
     chartContainer: {
-      marginBottom: '30px',
+      marginBottom: '16px',
       padding: '15px',
       backgroundColor: '#fff',
       borderRadius: '8px',
-      boxShadow: '0 2px 4px rgba(0,0,0,0.1)'
+      boxShadow: '0 1px 3px rgba(0,0,0,0.08)'
     },
     chartTitle: {
-      fontSize: '18px',
+      fontSize: '15px',
       fontWeight: 'bold',
-      marginBottom: '15px',
+      marginBottom: '10px',
       color: '#333'
+    },
+    // Zone wrappers
+    zoneBlock: {
+      borderRadius: '10px',
+      padding: '14px 16px',
+      marginBottom: '24px',
+    },
+    zoneHeader: {
+      fontSize: '16px',
+      fontWeight: 'bold',
+      marginBottom: '12px',
+      paddingBottom: '8px',
+      borderBottom: '2px solid rgba(0,0,0,0.08)'
     },
     loadingContainer: {
       display: 'flex',
@@ -269,6 +304,17 @@ export default function GraphPage() {
       <div style={styles.header}>
         <h2 style={styles.title}>📈 กราฟการทำงาน</h2>
       </div>
+
+      {/* Banner: ESP32 ยังไม่ได้เชื่อมต่อ */}
+      {!espConnected && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: '10px', background: '#fff8e1', border: '1px solid #ffca28', borderRadius: '8px', padding: '10px 16px', marginBottom: '12px', color: '#795548' }}>
+          <span style={{ fontSize: '20px' }}>⚠️</span>
+          <div>
+            <div style={{ fontWeight: 'bold', fontSize: '13px' }}>ESP32 ยังไม่ได้เชื่อมต่อ</div>
+            <div style={{ fontSize: '12px', marginTop: '2px' }}>กราฟที่แสดงอยู่เป็น <strong>ข้อมูลย้อนหลัง</strong> ที่บันทึกไว้ใน database — กราฟจะไม่อัปเดตจนกว่า ESP32 จะเชื่อมต่อ</div>
+          </div>
+        </div>
+      )}
 
       {error && (
         <div style={styles.errorBox}>
@@ -329,67 +375,94 @@ export default function GraphPage() {
       </div>
 
       {/* Sensor Charts */}
-      {
-        <div>
-          {sensorChartData.length === 0 ? (
-            <div style={styles.noDataMessage}>
-              ไม่มีข้อมูลเซนเซอร์สำหรับช่วงเวลานี้
+      {sensorChartData.length === 0 ? (
+        <div style={styles.noDataMessage}>ไม่มีข้อมูลเซนเซอร์สำหรับช่วงเวลานี้</div>
+      ) : (
+        <>
+          {/* ══════════════ ZONE ENV ══════════════ */}
+          <div style={{...styles.zoneBlock, background: '#e3f2fd', border: '2px solid #90caf9'}}>
+            <div style={{...styles.zoneHeader, color: '#1565c0'}}>🌡️ สภาพแวดล้อม</div>
+
+            {/* กราฟ 1: อุณหภูมิ + ความชื้นอากาศ */}
+            <div style={styles.chartContainer}>
+              <div style={styles.chartTitle}>อุณหภูมิ & ความชื้นอากาศ</div>
+              <ResponsiveContainer width="100%" height={280}>
+                <LineChart data={sensorChartData}>
+                  <CartesianGrid strokeDasharray="3 3" />
+                  <XAxis dataKey="name" angle={-35} textAnchor="end" height={80} tick={{fontSize:11}} />
+                  <YAxis yAxisId="left"  domain={[0, 50]}  label={{ value: '°C', angle: -90, position: 'insideLeft', offset: 10 }} tick={{fontSize:11}} />
+                  <YAxis yAxisId="right" orientation="right" domain={[0, 100]} label={{ value: '%', angle: 90, position: 'insideRight', offset: 10 }} tick={{fontSize:11}} />
+                  <Tooltip />
+                  <Legend />
+                  <Line yAxisId="left"  connectNulls type="monotone" dataKey="temp"     stroke="#d32f2f" name="อุณหภูมิ (°C)"      strokeWidth={2.5} dot={{ r: 4 }} activeDot={{ r: 6 }} />
+                  <Line yAxisId="right" connectNulls type="monotone" dataKey="humidity" stroke="#1976d2" name="ความชื้นอากาศ (%)"  strokeWidth={2.5} dot={{ r: 4 }} activeDot={{ r: 6 }} />
+                </LineChart>
+              </ResponsiveContainer>
             </div>
-          ) : (
-            <>
-              {/* Temperature & Humidity Chart */}
-              <div style={styles.chartContainer}>
-                <div style={styles.chartTitle}>🌡️ อุณหภูมิและความชื้น</div>
-                <ResponsiveContainer width="100%" height={300}>
-                  <LineChart data={sensorChartData}>
-                    <CartesianGrid strokeDasharray="3 3" />
-                    <XAxis dataKey="name" angle={-45} textAnchor="end" height={100} />
-                    <YAxis yAxisId="left" label={{ value: 'อุณหภูมิ (°C)', angle: -90, position: 'insideLeft' }} />
-                    <YAxis yAxisId="right" orientation="right" label={{ value: 'ความชื้น (%)', angle: 90, position: 'insideRight' }} />
-                    <Tooltip />
-                    <Legend />
-                    <Line yAxisId="left" type="monotone" dataKey="temp" stroke="#d32f2f" name="อุณหภูมิ (°C)" dot={{ r: 4 }} />
-                    <Line yAxisId="right" type="monotone" dataKey="humidity" stroke="#1976d2" name="ความชื้น (%)" dot={{ r: 4 }} />
-                  </LineChart>
-                </ResponsiveContainer>
-              </div>
 
-              {/* Soil Moisture Chart */}
-              <div style={styles.chartContainer}>
-                <div style={styles.chartTitle}>🌱 ความชื้นดิน</div>
-                <ResponsiveContainer width="100%" height={300}>
-                  <LineChart data={sensorChartData}>
-                    <CartesianGrid strokeDasharray="3 3" />
-                    <XAxis dataKey="name" angle={-45} textAnchor="end" height={100} />
-                    <YAxis label={{ value: 'ความชื้น (%)', angle: -90, position: 'insideLeft' }} />
-                    <Tooltip />
-                    <Legend />
-                    <Line type="monotone" dataKey="soil_1" stroke="#388e3c" name="ดิน 1 (%)" dot={{ r: 4 }} />
-                    <Line type="monotone" dataKey="soil_2" stroke="#00796b" name="ดิน 2 (%)" dot={{ r: 4 }} />
-                  </LineChart>
-                </ResponsiveContainer>
-              </div>
+            {/* กราฟ 2: แสง + CO2 */}
+            <div style={styles.chartContainer}>
+              <div style={styles.chartTitle}>แสง & CO₂</div>
+              <ResponsiveContainer width="100%" height={280}>
+                <LineChart data={sensorChartData}>
+                  <CartesianGrid strokeDasharray="3 3" />
+                  <XAxis dataKey="name" angle={-35} textAnchor="end" height={80} tick={{fontSize:11}} />
+                  <YAxis yAxisId="left"  domain={[0, 2000]} label={{ value: 'lux', angle: -90, position: 'insideLeft', offset: 10 }} tick={{fontSize:11}} />
+                  <YAxis yAxisId="right" orientation="right" domain={[0, 2000]} label={{ value: 'ppm', angle: 90, position: 'insideRight', offset: 10 }} tick={{fontSize:11}} />
+                  <Tooltip />
+                  <Legend />
+                  <Line yAxisId="left"  connectNulls type="monotone" dataKey="lux" stroke="#f57f17" name="แสง (lux)"  strokeWidth={2.5} dot={{ r: 4 }} activeDot={{ r: 6 }} />
+                  <Line yAxisId="right" connectNulls type="monotone" dataKey="co2" stroke="#7b1fa2" name="CO₂ (ppm)"  strokeWidth={2.5} dot={{ r: 4 }} activeDot={{ r: 6 }} />
+                </LineChart>
+              </ResponsiveContainer>
+            </div>
+          </div>
 
-              {/* Light & CO2 Chart */}
-              <div style={styles.chartContainer}>
-                <div style={styles.chartTitle}>💡 แสงและ CO2</div>
-                <ResponsiveContainer width="100%" height={300}>
-                  <LineChart data={sensorChartData}>
-                    <CartesianGrid strokeDasharray="3 3" />
-                    <XAxis dataKey="name" angle={-45} textAnchor="end" height={100} />
-                    <YAxis yAxisId="left" label={{ value: 'แสง (lux)', angle: -90, position: 'insideLeft' }} />
-                    <YAxis yAxisId="right" orientation="right" label={{ value: 'CO2 (ppm)', angle: 90, position: 'insideRight' }} />
-                    <Tooltip />
-                    <Legend />
-                    <Line yAxisId="left" type="monotone" dataKey="lux" stroke="#f57f17" name="แสง (lux)" dot={{ r: 4 }} />
-                    <Line yAxisId="right" type="monotone" dataKey="co2" stroke="#7b1fa2" name="CO2 (ppm)" dot={{ r: 4 }} />
-                  </LineChart>
-                </ResponsiveContainer>
-              </div>
-            </>
-          )}
-        </div>
-      }
+          {/* ══════════════ ZONE แปลง 1 ══════════════ */}
+          <div style={{...styles.zoneBlock, background: '#e8f5e9', border: '2px solid #a5d6a7'}}>
+            <div style={{...styles.zoneHeader, color: '#2e7d32'}}>🌱 แปลง 1 — ความชื้นดิน</div>
+
+            {/* กราฟ 3 */}
+            <div style={styles.chartContainer}>
+              <div style={styles.chartTitle}>ความชื้นดิน แปลง 1 (%)</div>
+              <ResponsiveContainer width="100%" height={280}>
+                <LineChart data={sensorChartData}>
+                  <CartesianGrid strokeDasharray="3 3" />
+                  <XAxis dataKey="name" angle={-35} textAnchor="end" height={80} tick={{fontSize:11}} />
+                  <YAxis domain={[0, 100]} label={{ value: '%', angle: -90, position: 'insideLeft', offset: 10 }} tick={{fontSize:11}} />
+                  <Tooltip />
+                  <Legend />
+                  <Line connectNulls type="monotone" dataKey="soil_1"       stroke="#1565c0" name="ดิน 1 (%)" strokeWidth={2.5} dot={{ r: 4 }} activeDot={{ r: 6 }} />
+                  <Line connectNulls type="monotone" dataKey="soil_2"       stroke="#e65100" name="ดิน 2 (%)" strokeWidth={2.5} dot={{ r: 4 }} activeDot={{ r: 6 }} />
+                  <Line connectNulls type="monotone" dataKey="node3_s2_hum" stroke="#6a1b9a" name="ดิน 3 (%)" strokeWidth={2.5} dot={{ r: 4 }} activeDot={{ r: 6 }} />
+                </LineChart>
+              </ResponsiveContainer>
+            </div>
+          </div>
+
+          {/* ══════════════ ZONE แปลง 2 ══════════════ */}
+          <div style={{...styles.zoneBlock, background: '#f1f8e9', border: '2px solid #c5e1a5'}}>
+            <div style={{...styles.zoneHeader, color: '#558b2f'}}>🌿 แปลง 2 — ความชื้นดิน</div>
+
+            {/* กราฟ 4 */}
+            <div style={styles.chartContainer}>
+              <div style={styles.chartTitle}>ความชื้นดิน แปลง 2 (%)</div>
+              <ResponsiveContainer width="100%" height={280}>
+                <LineChart data={sensorChartData}>
+                  <CartesianGrid strokeDasharray="3 3" />
+                  <XAxis dataKey="name" angle={-35} textAnchor="end" height={80} tick={{fontSize:11}} />
+                  <YAxis domain={[0, 100]} label={{ value: '%', angle: -90, position: 'insideLeft', offset: 10 }} tick={{fontSize:11}} />
+                  <Tooltip />
+                  <Legend />
+                  <Line connectNulls type="monotone" dataKey="node3_s1_hum" stroke="#1565c0" name="ดิน 1 (%)" strokeWidth={2.5} dot={{ r: 4 }} activeDot={{ r: 6 }} />
+                  <Line connectNulls type="monotone" dataKey="node3_s3_hum" stroke="#e65100" name="ดิน 2 (%)" strokeWidth={2.5} dot={{ r: 4 }} activeDot={{ r: 6 }} />
+                  <Line connectNulls type="monotone" dataKey="node3_s4_hum" stroke="#6a1b9a" name="ดิน 3 (%)" strokeWidth={2.5} dot={{ r: 4 }} activeDot={{ r: 6 }} />
+                </LineChart>
+              </ResponsiveContainer>
+            </div>
+          </div>
+        </>
+      )}
     </div>
   );
 }

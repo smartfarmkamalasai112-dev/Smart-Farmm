@@ -13,25 +13,50 @@ import {
 import DataTablePage from './pages/DataTablePage';
 import GraphPage from './pages/GraphPage';
 
-// ⚠️ CONFIGURATION: Change to your Raspberry Pi IP or server IP
-// Socket.IO connection URL:
-// - Dev mode (Vite): Use relative path, Vite proxy will intercept /socket.io
-// - Prod mode: Connect via current origin (port 80) where Nginx proxies to backend
-const SOCKET_URL = import.meta.env.DEV
-  ? ''  // Dev mode: empty string = use same origin, Vite proxy handles /socket.io
-  : ''; // Prod mode: empty string = use same origin (port 80), Nginx proxies to Flask
+// ⚠️ CONFIGURATION: Flask backend URL
+// Socket.IO connects directly to Flask on port 5000
+// Auto-detect host so it works on both localhost and Tailscale/LAN access
+const SOCKET_URL = `http://${window.location.hostname}:5000`;
 const MAX_HISTORY_POINTS = 50;
+
+// Relay indices that use dual-sensor AUTO mode (Fan=1 only)
+const DUAL_SENSOR_RELAYS = [1];
+
+// Sensor param labels/icons/units for display
+const PARAM_INFO = {
+  soil_hum:   { label: 'ความชื้นดิน',   unit: '%',   icon: '🌱' },
+  soil_2_hum: { label: 'ความชื้นดิน2',  unit: '%',   icon: '🌱' },
+  temp:       { label: 'อุณหภูมิ',       unit: '°C',  icon: '🌡️' },
+  hum:        { label: 'ความชื้นอากาศ', unit: '%',   icon: '💧' },
+  lux:        { label: 'แสง',           unit: 'lux', icon: '☀️' },
+  co2:        { label: 'CO₂',           unit: 'ppm', icon: '🌫️' },
+  s1_hum:     { label: 'ดิน S1',        unit: '%',   icon: '🌱' },
+  s2_hum:     { label: 'ดิน S2',        unit: '%',   icon: '🌱' },
+  s3_hum:     { label: 'ดิน S3',        unit: '%',   icon: '🌱' },
+  s4_hum:     { label: 'ดิน S4',        unit: '%',   icon: '🌱' },
+};
+const getParamInfo = (param) => PARAM_INFO[param] || { label: param, unit: '', icon: '📡' };
 
 /**
  * Main Smart Farm Dashboard Component
  * Original Design - ออกแบบดั้งเดิม
  */
+
+// Context for ESP32 sensor freshness — used by SensorCard and MetricCard
+const SensorFreshContext = React.createContext(true);
+
 const App = () => {
   // Connection state
   const [connected, setConnected] = useState(false);
   const [connectionStatus, setConnectionStatus] = useState('connecting'); // 'connecting', 'connected', 'disconnected', 'error'
   const [connectionMessage, setConnectionMessage] = useState('Connecting to server...');
   const socketRef = useRef(null);
+
+  // ESP32 sensor freshness — false until real MQTT data arrives
+  const [espConnected, setEspConnected] = useState(false);
+  // Delay banner: don't show ESP warning for first 4s after page load (cold-start)
+  const [espReady, setEspReady] = useState(false);
+  useEffect(() => { const t = setTimeout(() => setEspReady(true), 4000); return () => clearTimeout(t); }, []);
 
   // Tab state
   const [activeTab, setActiveTab] = useState('monitor');
@@ -148,13 +173,13 @@ const App = () => {
           case 'soil_2_hum':
             return sensorData.soil_2?.hum || 0;
           case 's1_hum':
-            return soilSensors.soil_1?.hum || 0;
+            return typeof soilSensors.soil_1 === 'object' ? (soilSensors.soil_1?.hum || 0) : (soilSensors.soil_1 || 0);
           case 's2_hum':
-            return soilSensors.soil_2?.hum || 0;
+            return typeof soilSensors.soil_2 === 'object' ? (soilSensors.soil_2?.hum || 0) : (soilSensors.soil_2 || 0);
           case 's3_hum':
-            return soilSensors.soil_3?.hum || 0;
+            return typeof soilSensors.soil_3 === 'object' ? (soilSensors.soil_3?.hum || 0) : (soilSensors.soil_3 || 0);
           case 's4_hum':
-            return soilSensors.soil_4?.hum || 0;
+            return typeof soilSensors.soil_4 === 'object' ? (soilSensors.soil_4?.hum || 0) : (soilSensors.soil_4 || 0);
           case 'temp':
             return sensorData.air?.temp || 0;
           case 'hum':
@@ -172,13 +197,13 @@ const App = () => {
       const newValues = {};
       const idx = pendingAutoRelayIndex;
       
-      if (idx === 1 && tempAutoConfig.param1) {
+      if (DUAL_SENSOR_RELAYS.includes(idx) || !!(relayConfigs[idx]?.target1)) {
         // Dual sensor - use tempAutoConfig values
         newValues[idx] = {
-          current_value1: parseFloat((getSensorValue(tempAutoConfig.param1)).toFixed(2)),
-          sensor1_name: tempAutoConfig.param1,
-          current_value2: parseFloat((getSensorValue(tempAutoConfig.param2)).toFixed(2)),
-          sensor2_name: tempAutoConfig.param2
+          current_value1: parseFloat((getSensorValue(tempAutoConfig.param1 || relayConfigs[idx]?.param1 || 'temp')).toFixed(2)),
+          sensor1_name: tempAutoConfig.param1 || relayConfigs[idx]?.param1 || 'temp',
+          current_value2: parseFloat((getSensorValue(tempAutoConfig.param2 || relayConfigs[idx]?.param2 || 'hum')).toFixed(2)),
+          sensor2_name: tempAutoConfig.param2 || relayConfigs[idx]?.param2 || 'hum'
         };
       } else {
         // Single sensor - use tempAutoConfig values
@@ -243,6 +268,10 @@ const App = () => {
             relays: data.relays || [false, false, false, false],
             last_update: data.last_update || new Date().toISOString()
           });
+          // ⭐ Set ESP freshness immediately from status (no need to wait for socket event)
+          if (typeof data.sensor_fresh === 'boolean') {
+            setEspConnected(data.sensor_fresh);
+          }
         })
         .catch(err => console.error('❌ Failed to fetch initial status:', err));
       
@@ -325,6 +354,9 @@ const App = () => {
     // Sensor data real-time update (zero latency)
     socket.on('sensor_update', (newData) => {
       console.log('📡 Sensor Update:', newData);
+
+      // Update ESP32 freshness flag
+      setEspConnected(newData._fresh !== false);
       
       // Validate and update sensor data with fallbacks
       setSensorData(prev => ({
@@ -387,6 +419,11 @@ const App = () => {
         last_update: newStatus.last_update ?? new Date().toISOString()
       }));
       
+      // ⭐ Update ESP connected state from status_update's sensor_fresh field
+      if (typeof newStatus.sensor_fresh === 'boolean') {
+        setEspConnected(newStatus.sensor_fresh);
+      }
+
       // Update relay modes if received from backend
       if (newStatus.relay_modes) {
         console.log('📋 Relay Modes Updated:', newStatus.relay_modes);
@@ -492,63 +529,26 @@ const App = () => {
     }
   };
 
-  // Handle clicking AUTO button - toggle between AUTO and MANUAL
-  const handleAutoClick = async (index) => {
-    const currentMode = relayModes[index];
-    
-    // If already in AUTO mode, switch to MANUAL
-    if (currentMode === 'AUTO') {
-      console.log(`🔄 Relay ${index} is in AUTO, switching to MANUAL...`);
-      await changeRelayMode(index, 'MANUAL');
+  // Handle clicking AUTO button - if already AUTO → switch to MANUAL, else open config modal
+  const handleAutoClick = (index) => {
+    if (relayModes[index] === 'AUTO') {
+      changeRelayMode(index, 'MANUAL');
       return;
     }
-    
-    // If in MANUAL mode, show config modal to set up AUTO
+    const currentConfig = relayConfigs[index] || {};
+    setTempAutoConfig({
+      param1: currentConfig.param1 || 'temp',
+      condition1: currentConfig.condition1 || '>',
+      target1: currentConfig.target1 != null ? String(currentConfig.target1) : '30',
+      logic: currentConfig.logic || '&&',
+      param2: currentConfig.param2 || 'hum',
+      condition2: currentConfig.condition2 || '>',
+      target2: currentConfig.target2 != null ? String(currentConfig.target2) : '80',
+      param: currentConfig.param || 'soil_hum',
+      condition: currentConfig.condition || '<',
+      target: currentConfig.target != null ? String(currentConfig.target) : '40',
+    });
     setPendingAutoRelayIndex(index);
-    
-    // Load current config for this relay
-    const cfg = relayConfigs[index];
-    if (cfg) {
-      if (index === 1 && cfg.target1) {
-        // Dual sensor config (Fan)
-        setTempAutoConfig({
-          param1: cfg.param1 || 'temp',
-          condition1: cfg.condition1 || '>',
-          target1: cfg.target1 || 0,
-          param2: cfg.param2 || 'hum',
-          condition2: cfg.condition2 || '>',
-          target2: cfg.target2 || 0,
-          logic: cfg.logic || 'OR'
-        });
-      } else {
-        // Single sensor config
-        setTempAutoConfig({
-          param: cfg.param || 'soil_hum',
-          condition: cfg.condition || '<',
-          target: cfg.target || 0
-        });
-      }
-    } else {
-      // No existing config, use defaults
-      if (index === 1) {
-        setTempAutoConfig({
-          param1: 'temp',
-          condition1: '>',
-          target1: 0,
-          param2: 'hum',
-          condition2: '>',
-          target2: 0,
-          logic: 'OR'
-        });
-      } else {
-        setTempAutoConfig({
-          param: 'soil_hum',
-          condition: '<',
-          target: 0
-        });
-      }
-    }
-    
     setShowAutoModal(true);
   };
 
@@ -558,26 +558,42 @@ const App = () => {
       try {
         console.log(`🔍 [Relay ${pendingAutoRelayIndex}] Sending config from App.jsx:`, tempAutoConfig);
         
+        // Build clean config (dual or single) — avoid sending mixed fields
+        const isDual = DUAL_SENSOR_RELAYS.includes(pendingAutoRelayIndex) || !!(relayConfigs[pendingAutoRelayIndex]?.target1);
+        const cleanConfig = isDual ? {
+          index: pendingAutoRelayIndex,
+          param1: tempAutoConfig.param1,
+          condition1: tempAutoConfig.condition1,
+          target1: parseFloat(tempAutoConfig.target1) || 0,
+          param2: tempAutoConfig.param2,
+          condition2: tempAutoConfig.condition2,
+          target2: parseFloat(tempAutoConfig.target2) || 0,
+          logic: tempAutoConfig.logic || 'OR'
+        } : {
+          index: pendingAutoRelayIndex,
+          param: tempAutoConfig.param,
+          condition: tempAutoConfig.condition,
+          target: parseFloat(tempAutoConfig.target) || 0
+        };
+
         // First save the config to backend
         const configResponse = await fetch(`${SOCKET_URL}/api/relay-configs`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            index: pendingAutoRelayIndex,
-            ...tempAutoConfig
-          })
+          body: JSON.stringify(cleanConfig)
         });
         
         if (!configResponse.ok) {
-          throw new Error('Failed to save config');
+          const errText = await configResponse.text();
+          throw new Error(`Failed to save config: ${errText}`);
         }
         
         console.log(`✅ Config saved for relay ${pendingAutoRelayIndex}:`, tempAutoConfig);
         
-        // Update local relayConfigs so next time modal opens it has the saved config
+        // Update local relayConfigs with clean config only (no mixed dual/single fields)
         setRelayConfigs({
           ...relayConfigs,
-          [pendingAutoRelayIndex]: tempAutoConfig
+          [pendingAutoRelayIndex]: cleanConfig
         });
         
         // Then activate AUTO mode
@@ -615,6 +631,8 @@ const App = () => {
       const soil1 = sensorData.soil_1?.hum || 0;
       const soil2 = sensorData.soil_2?.hum || 0;
       return soil1 && soil2 ? ((soil1 + soil2) / 2).toFixed(1) : soil1.toFixed(1) || soil2.toFixed(1);
+    } else if (param === 'soil_2_hum') {
+      return (sensorData.soil_2?.hum || 0).toFixed(1);
     } else if (param === 'temp') {
       return sensorData.air?.temp?.toFixed(1) || '-';
     } else if (param === 'hum') {
@@ -623,11 +641,23 @@ const App = () => {
       return sensorData.env?.lux?.toFixed(1) || '-';
     } else if (param === 'co2') {
       return sensorData.env?.co2?.toFixed(0) || '-';
+    } else if (param === 's1_hum') {
+      const v = typeof soilSensors.soil_1 === 'object' ? (soilSensors.soil_1?.hum || 0) : (soilSensors.soil_1 || 0);
+      return Number(v).toFixed(1);
+    } else if (param === 's2_hum') {
+      const v = typeof soilSensors.soil_2 === 'object' ? (soilSensors.soil_2?.hum || 0) : (soilSensors.soil_2 || 0);
+      return Number(v).toFixed(1);
+    } else if (param === 's3_hum') {
+      const v = typeof soilSensors.soil_3 === 'object' ? (soilSensors.soil_3?.hum || 0) : (soilSensors.soil_3 || 0);
+      return Number(v).toFixed(1);
+    } else if (param === 's4_hum') {
+      const v = typeof soilSensors.soil_4 === 'object' ? (soilSensors.soil_4?.hum || 0) : (soilSensors.soil_4 || 0);
+      return Number(v).toFixed(1);
     }
     return '-';
   };
 
-  const relayNames = ['💧 ปั้มแปลง1 (Pump)', '🌀 พัดลม (Fan)', '💡 ไฟส่อง (Lamp)', '🌫️ พ่นหมอก (Mist)', '💨 ปั้มแปลง2 (Plot Pump 2)', '🔄 ปั้ม Evap', '🚰 วาล์ว1 (Plot1)', '🚰 วาล์ว2 (Plot1)', '🚰 วาล์ว3 (Plot1)', '🚰 วาล์ว1 (Plot2)', '🚰 วาล์ว2 (Plot2)', '🚰 วาล์ว3 (Plot2)'];
+  const relayNames = ['💧 ปั้มแปลง1 (Pump)', '🌀 พัดลม (Fan)', '💡 ไฟส่อง (Lamp)', '🌫️ พ่นหมอก (Mist)', '💨 ปั้มแปลง2 (Pump 2)', '🔄 ปั้ม Evap', '🚰 วาล์ว1 (Plot1)', '🚰 วาล์ว2 (Plot1)', '🚰 วาล์ว3 (Plot1)', '🚰 วาล์ว1 (Plot2)', '🚰 วาล์ว2 (Plot2)', '🚰 วาล์ว3 (Plot2)'];
 
   return (
     <div style={styles.container}>
@@ -707,409 +737,351 @@ const App = () => {
 
       {/* MONITOR TAB */}
       {activeTab === 'monitor' && (
-        <div>
-          {/* Primary Sensor Cards Grid */}
-          <div style={styles.cardGrid}>
-            <SensorCard
-              title="🌡️ Temperature"
-              value={sensorData.air.temp}
-              unit="°C"
-              color="#ff9800"
-            />
-            <SensorCard
-              title="💧 Air Humidity"
-              value={sensorData.air.hum}
-              unit="%"
-              color="#2196f3"
-            />
-            <SensorCard
-              title="🌱 Soil-1 Humidity"
-              value={sensorData.soil_1.hum}
-              unit="%"
-              color="#795548"
-            />
-            <SensorCard
-              title="☀️ Light (Lux)"
-              value={sensorData.env.lux}
-              unit="lx"
-              color="#ffeb3b"
-              textColor="#333"
-            />
-          </div>
+        <SensorFreshContext.Provider value={espConnected}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '24px', background: '#f4f6f8', padding: '20px', borderRadius: '12px' }}>
 
-          {/* NPK & Advanced Metrics */}
-          <div style={styles.metricsGrid}>
-            <MetricCard
-              title="📊 Soil-1 pH"
-              value={sensorData.soil_1.ph}
-              range="0-14"
-              color="#9c27b0"
-            />
-            <MetricCard
-              title="🧪 Nitrogen (N)"
-              value={sensorData.soil_1.n}
-              unit="ppm"
-              color="#4caf50"
-            />
-            <MetricCard
-              title="🧬 Phosphorus (P)"
-              value={sensorData.soil_1.p}
-              unit="ppm"
-              color="#ff5722"
-            />
-            <MetricCard
-              title="💎 Potassium (K)"
-              value={sensorData.soil_1.k}
-              unit="ppm"
-              color="#ffc107"
-              textColor="#333"
-            />
-            <MetricCard
-              title="💨 CO₂ Level"
-              value={sensorData.env.co2}
-              unit="ppm"
-              color="#03a9f4"
-            />
-            <MetricCard
-              title="💧 Soil-2 Humidity"
-              value={sensorData.soil_2.hum}
-              unit="%"
-              color="#8d6e63"
-            />
-          </div>
-
-          {/* ⭐ NEW: Node 3 Soil Sensors */}
-          <div style={{marginTop: '30px', padding: '20px', backgroundColor: '#f5f5f5', borderRadius: '8px'}}>
-            <h3 style={{fontSize: '18px', fontWeight: 'bold', marginBottom: '15px', color: '#2d3436'}}>
-              🌱 Node 3 - Soil Moisture Sensors
-            </h3>
-              <div style={styles.metricsGrid}>
-                <MetricCard
-                  title="🌾 S1 Humidity"
-                  value={typeof soilSensors.soil_1 === 'object' ? soilSensors.soil_1?.hum ?? 0.0 : soilSensors.soil_1 ?? 0.0}
-                  unit="%"
-                  color="#7cb342"
-                />
-                <MetricCard
-                  title="🌾 S1 pH"
-                  value={typeof soilSensors.soil_1 === 'object' ? soilSensors.soil_1?.ph ?? 0.0 : 0.0}
-                  unit=""
-                  color="#8bc34a"
-                />
-                <MetricCard
-                  title="🌾 S1 Nitrogen"
-                  value={typeof soilSensors.soil_1 === 'object' ? soilSensors.soil_1?.n ?? 0 : 0}
-                  unit="mg/kg"
-                  color="#9ccc65"
-                />
-                <MetricCard
-                  title="🌾 S1 Phosphorus"
-                  value={typeof soilSensors.soil_1 === 'object' ? soilSensors.soil_1?.p ?? 0 : 0}
-                  unit="mg/kg"
-                  color="#aed581"
-                />
-                <MetricCard
-                  title="🌾 S1 Potassium"
-                  value={typeof soilSensors.soil_1 === 'object' ? soilSensors.soil_1?.k ?? 0 : 0}
-                  unit="mg/kg"
-                  color="#cddc39"
-                />
-                <MetricCard
-                  title="🌾 S2 Humidity"
-                  value={soilSensors.soil_2 ?? 0.0}
-                  unit="%"
-                  color="#c5e1a5"
-                />
-                <MetricCard
-                  title="🌾 S3 Humidity"
-                  value={soilSensors.soil_3 ?? 0.0}
-                  unit="%"
-                  color="#d4e157"
-                />
-                <MetricCard
-                  title="🌾 S4 Humidity"
-                  value={soilSensors.soil_4 ?? 0.0}
-                  unit="%"
-                  color="#dcedc8"
-                />
+          {/* ===== Banner: ยังไม่มีสัญญาณจาก ESP32 ===== */}
+          {espReady && !espConnected && (
+            <div style={{ display: 'flex', alignItems: 'center', gap: '12px', background: '#fff8e1', border: '1px solid #ffca28', borderRadius: '10px', padding: '12px 18px', color: '#795548' }}>
+              <span style={{ fontSize: '22px' }}>⚠️</span>
+              <div>
+                <div style={{ fontWeight: 'bold', fontSize: '14px' }}>ยังไม่ได้รับข้อมูลจาก ESP32</div>
+                <div style={{ fontSize: '12px', marginTop: '2px' }}>ค่าที่แสดงด้วย "–" คือยังไม่มีสัญญาณ กรุณาตรวจสอบการเชื่อมต่อ ESP32</div>
               </div>
             </div>
+          )}
+
+          {/* ===== ZONE 1: โรงเรือน ===== */}
+          <div style={{ border: '1px solid #e0e0e0', background: '#ffffff', borderRadius: '12px', padding: '20px', boxShadow: '0 4px 12px rgba(0,0,0,0.05)' }}>
+            <h3 style={{ color: '#2c3e50', fontSize: '18px', fontWeight: 'bold', marginBottom: '16px', display: 'flex', alignItems: 'center', gap: '8px', borderBottom: '1px solid #ecf0f1', paddingBottom: '12px' }}>
+              🏠 โซนโรงเรือน
+            </h3>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: '16px' }}>
+              <SensorCard title="🌡️ Temperature"   value={sensorData.air.temp}  unit="°C"  color="#e67e22" />
+              <SensorCard title="💧 Air Humidity"   value={sensorData.air.hum}   unit="%"   color="#3498db" />
+              <SensorCard title="☀️ Light (Lux)"    value={sensorData.env.lux}   unit="lx"  color="#f1c40f" textColor="#333" />
+              <SensorCard title="💨 CO₂ Level"      value={sensorData.env.co2}   unit="ppm" color="#1abc9c" />
+            </div>
+          </div>
+
+          {/* ===== ZONE 2: แปลง 1 ===== */}
+          <div style={{ border: '1px solid #e0e0e0', background: '#ffffff', borderRadius: '12px', padding: '20px', boxShadow: '0 4px 12px rgba(0,0,0,0.05)' }}>
+            <h3 style={{ color: '#5d4037', fontSize: '18px', fontWeight: 'bold', marginBottom: '4px', display: 'flex', alignItems: 'center', gap: '8px' }}>
+              🌱 โซนแปลง 1
+              <span style={{ fontSize: '11px', fontWeight: 'normal', background: '#efebe9', padding: '2px 8px', borderRadius: '10px', color: '#795548' }}>Node 1</span>
+            </h3>
+            <p style={{ color: '#8d6e63', fontSize: '12px', marginBottom: '16px' }}>ความชื้นดิน · ค่า pH · ธาตุอาหาร NPK</p>
+
+            <p style={{ color: '#6d4c41', fontSize: '12px', fontWeight: 'bold', marginBottom: '8px', letterSpacing: '1px', borderBottom: '1px solid #efebe9', paddingBottom: '6px' }}>💧 ความชื้นดิน</p>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: '12px', marginBottom: '16px' }}>
+              <SensorCard title="💧 Sensor ดิน 1 แปลง 1"     value={sensorData.soil_1.hum}  unit="%" color="#a1887f" />
+              <SensorCard title="💧 Sensor ดิน 2 แปลง 1"     value={sensorData.soil_2.hum}  unit="%" color="#bcaaa4" textColor="#333"/>
+              <SensorCard title="💧 Sensor ดิน 3 แปลง 1"     value={typeof soilSensors.soil_2 === 'object' ? soilSensors.soil_2?.hum ?? 0.0 : soilSensors.soil_2 ?? 0.0} unit="%" color="#d7ccc8" textColor="#333"/>
+            </div>
+
+            <p style={{ color: '#6d4c41', fontSize: '12px', fontWeight: 'bold', marginBottom: '8px', letterSpacing: '1px', borderBottom: '1px solid #efebe9', paddingBottom: '6px' }}>🧪 ธาตุอาหารและค่าความเป็นกรด-ด่าง</p>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: '12px' }}>
+              <MetricCard title="🧫 ค่า pH ดิน แปลง 1"      value={sensorData.soil_1.ph}   unit=""      color="#9b59b6" />
+              <MetricCard title="🌿 ไนโตรเจน (N) แปลง 1"    value={sensorData.soil_1.n}    unit="mg/kg" color="#27ae60" />
+              <MetricCard title="🔴 ฟอสฟอรัส (P) แปลง 1"    value={sensorData.soil_1.p}    unit="mg/kg" color="#d35400" />
+              <MetricCard title="🟡 โพแทสเซียม (K) แปลง 1"  value={sensorData.soil_1.k}    unit="mg/kg" color="#f39c12" textColor="#333" />
+            </div>
+          </div>
+
+          {/* ===== ZONE 3: แปลง 2 ===== */}
+          <div style={{ border: '1px solid #e0e0e0', background: '#ffffff', borderRadius: '12px', padding: '20px', boxShadow: '0 4px 12px rgba(0,0,0,0.05)' }}>
+            <h3 style={{ color: '#2e7d32', fontSize: '18px', fontWeight: 'bold', marginBottom: '4px', display: 'flex', alignItems: 'center', gap: '8px' }}>
+              🌿 โซนแปลง 2
+              <span style={{ fontSize: '11px', fontWeight: 'normal', background: '#e8f5e9', padding: '2px 8px', borderRadius: '10px', color: '#388e3c' }}>Node 3</span>
+            </h3>
+            <p style={{ color: '#4caf50', fontSize: '12px', marginBottom: '16px' }}>ความชื้นดิน · ค่า pH · ธาตุอาหาร NPK</p>
+
+            <p style={{ color: '#388e3c', fontSize: '12px', fontWeight: 'bold', marginBottom: '8px', letterSpacing: '1px', borderBottom: '1px solid #e8f5e9', paddingBottom: '6px' }}>💧 ความชื้นดิน</p>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: '12px', marginBottom: '16px' }}>
+              <SensorCard title="💧 Sensor ดิน 1 แปลง 2" value={typeof soilSensors.soil_1 === 'object' ? soilSensors.soil_1?.hum ?? 0.0 : soilSensors.soil_1 ?? 0.0} unit="%" color="#66bb6a" />
+              <SensorCard title="💧 Sensor ดิน 2 แปลง 2" value={typeof soilSensors.soil_3 === 'object' ? soilSensors.soil_3?.hum ?? 0.0 : soilSensors.soil_3 ?? 0.0} unit="%" color="#81c784" textColor="#333"/>
+              <SensorCard title="💧 Sensor ดิน 3 แปลง 2" value={typeof soilSensors.soil_4 === 'object' ? soilSensors.soil_4?.hum ?? 0.0 : soilSensors.soil_4 ?? 0.0} unit="%" color="#a5d6a7" textColor="#333"/>
+            </div>
+
+            <p style={{ color: '#388e3c', fontSize: '12px', fontWeight: 'bold', marginBottom: '8px', letterSpacing: '1px', borderBottom: '1px solid #e8f5e9', paddingBottom: '6px' }}>🧪 ธาตุอาหารและค่าความเป็นกรด-ด่าง</p>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: '12px' }}>
+              <MetricCard title="🧫 ค่า pH ดิน แปลง 2"      value={typeof soilSensors.soil_1 === 'object' ? soilSensors.soil_1?.ph ?? 0.0 : 0.0}  unit=""      color="#8e44ad" />
+              <MetricCard title="🌿 ไนโตรเจน (N) แปลง 2"    value={typeof soilSensors.soil_1 === 'object' ? soilSensors.soil_1?.n ?? 0 : 0}        unit="mg/kg" color="#27ae60" />
+              <MetricCard title="🔴 ฟอสฟอรัส (P) แปลง 2"    value={typeof soilSensors.soil_1 === 'object' ? soilSensors.soil_1?.p ?? 0 : 0}        unit="mg/kg" color="#d35400" />
+              <MetricCard title="🟡 โพแทสเซียม (K) แปลง 2"  value={typeof soilSensors.soil_1 === 'object' ? soilSensors.soil_1?.k ?? 0 : 0}        unit="mg/kg" color="#f39c12" textColor="#333" />
+            </div>
+          </div>
 
         </div>
+        </SensorFreshContext.Provider>
       )}
 
       {/* CONTROL TAB */}
       {activeTab === 'control' && (
-        <div>
-          <div style={styles.relayCardsWrapper}>
-            <h2 style={styles.wrapperTitle}>1</h2>
-            <div style={styles.relayCardsContainer}>
-            {[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11].map((index) => (
-              <div key={index} style={styles.relayCard}>
-                {/* Relay Header */}
-                <div style={styles.relayHeader}>
-                  <h3 style={styles.relayName}>{relayNames[index]}</h3>
-                  <div style={styles.relayModeSelector}>
-                    <button
-                      onClick={() => changeRelayMode(index, 'MANUAL')}
-                      style={{
-                        ...styles.modeBtn,
-                        ...(relayModes[index] === 'MANUAL'
-                          ? styles.modeBtnActive
-                          : styles.modeBtnInactive)
-                      }}
-                    >
-                      ⚙️ MANUAL
-                    </button>
-                    {/* ⭐ PUMP (0) & PLOT PUMP 2 (4): MANUAL ONLY */}
-                    {(index !== 0 && index !== 4) && (
-                      <button
-                        onClick={() => handleAutoClick(index)}
-                        style={{
-                          ...styles.modeBtn,
-                          ...(relayModes[index] === 'AUTO'
-                            ? styles.modeBtnActive
-                            : styles.modeBtnInactive)
-                        }}
-                      >
-                        🤖 AUTO
-                      </button>
-                    )}
-                  </div>
-                </div>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '24px' }}>
 
-                {/* Relay Status */}
-                <div style={styles.relayStatus}>
-                  <p style={styles.statusLabel}>
-                    Status: <span style={statusData.relays[index] ? styles.onLabel : styles.offLabel}>
-                      {statusData.relays[index] ? '◆ ON' : '⏻ OFF'}
-                    </span>
-                  </p>
-                </div>
-
-                {/* Mode-specific Content */}
-                {relayModes[index] === 'MANUAL' ? (
-                  <div style={styles.manualMode}>
-                    <p style={styles.modeLabel}>Manual Control (ควบคุมเอง)</p>
-                    <button
-                      onClick={() => toggleRelay(index)}
-                      style={{
-                        ...styles.toggleButton,
-                        backgroundColor: statusData.relays[index] ? '#f44336' : '#4caf50',
-                        color: 'white'
-                      }}
-                    >
-                      {statusData.relays[index] ? '🔴 Turn OFF' : '🟢 Turn ON'}
-                    </button>
-                  </div>
-                ) : (
-                  <div style={styles.autoMode}>
-                    <p style={styles.modeLabel}>Auto Mode (อัตโนมัติ)</p>
-                    <div style={styles.autoConfig}>
-                      <p>IF Condition Triggered → Relay ON</p>
-                      {index === 1 && relayConfigs[index].target1 !== undefined ? (
-                        // Dual sensor config for Fan
-                        <p style={styles.configText}>
-                          ({relayConfigs[index].param1} {relayConfigs[index].condition1} {relayConfigs[index].target1}) {relayConfigs[index].logic} ({relayConfigs[index].param2} {relayConfigs[index].condition2} {relayConfigs[index].target2})
-                        </p>
-                      ) : (
-                        // Single sensor config for other relays
-                        <p style={styles.configText}>
-                          Target: {relayConfigs[index].target} {relayConfigs[index].param}
-                        </p>
-                      )}
-                    </div>
-                  </div>
-                )}
+          {/* Banner: ESP32 ยังไม่ได้เชื่อมต่อ */}
+          {espReady && !espConnected && (
+            <div style={{ display: 'flex', alignItems: 'center', gap: '10px', background: '#fff8e1', border: '1px solid #ffca28', borderRadius: '8px', padding: '10px 16px', color: '#795548' }}>
+              <span style={{ fontSize: '20px' }}>⚠️</span>
+              <div>
+                <div style={{ fontWeight: 'bold', fontSize: '13px' }}>ESP32 ยังไม่ได้เชื่อมต่อ</div>
+                <div style={{ fontSize: '12px', marginTop: '2px' }}>สถานะรีเลย์ที่แสดงคือ <strong>สถานะล่าสุดที่บันทึกไว้</strong> — อาจไม่ตรงกับสถานะจริงของอุปกรณ์</div>
               </div>
-            ))}
+            </div>
+          )}
+
+          {/* Zone: โรงเรือน */}
+          <div style={{ border: '1px solid #e0e0e0', background: '#ffffff', borderRadius: '12px', padding: '20px', boxShadow: '0 4px 12px rgba(0,0,0,0.05)' }}>
+            <h3 style={{ color: '#2c3e50', fontSize: '18px', fontWeight: 'bold', marginBottom: '16px', display: 'flex', alignItems: 'center', gap: '8px', borderBottom: '1px solid #ecf0f1', paddingBottom: '12px' }}>
+              🏠 โซนโรงเรือน
+            </h3>
+            <div style={styles.relayCardsContainer}>
+              {[1, 3, 5, 2].map((index) => (
+                <RelayCard
+                  key={index}
+                  index={index}
+                  relayNames={relayNames}
+                  relayModes={relayModes}
+                  statusData={statusData}
+                  changeRelayMode={changeRelayMode}
+                  handleAutoClick={handleAutoClick}
+                  toggleRelay={toggleRelay}
+                  relayConfigs={relayConfigs}
+                  espConnected={espConnected}
+                />
+              ))}
             </div>
           </div>
 
-          {statusData.last_update && (
-            <div style={styles.timestamp}>
-              Last Update: {new Date(statusData.last_update).toLocaleString()}
+          {/* Zone: แปลง 1 */}
+          <div style={{ border: '1px solid #e0e0e0', background: '#ffffff', borderRadius: '12px', padding: '20px', boxShadow: '0 4px 12px rgba(0,0,0,0.05)' }}>
+            <h3 style={{ color: '#5d4037', fontSize: '18px', fontWeight: 'bold', marginBottom: '16px', display: 'flex', alignItems: 'center', gap: '8px', borderBottom: '1px solid #ecf0f1', paddingBottom: '12px' }}>
+              🌱 โซนแปลง 1
+            </h3>
+            <div style={styles.relayCardsContainer}>
+              {[0, 6, 7, 8].map((index) => (
+                <RelayCard
+                  key={index}
+                  index={index}
+                  relayNames={relayNames}
+                  relayModes={relayModes}
+                  statusData={statusData}
+                  changeRelayMode={changeRelayMode}
+                  handleAutoClick={handleAutoClick}
+                  toggleRelay={toggleRelay}
+                  relayConfigs={relayConfigs}
+                  espConnected={espConnected}
+                />
+              ))}
             </div>
-          )}
+          </div>
 
-          {/* AUTO ACTIVATION MODAL - Shows when switching to AUTO */}
-          {showAutoModal && pendingAutoRelayIndex !== null && (
-            <div style={styles.modalOverlay}>
-              <div style={{...styles.modal, maxWidth: '500px'}}>
-                <h3 style={styles.modalTitle}>⚙️ ตั้งค่า AUTO - {relayNames[pendingAutoRelayIndex]}</h3>
-                
+          {/* Zone: แปลง 2 */}
+          <div style={{ border: '1px solid #e0e0e0', background: '#ffffff', borderRadius: '12px', padding: '20px', boxShadow: '0 4px 12px rgba(0,0,0,0.05)' }}>
+            <h3 style={{ color: '#2e7d32', fontSize: '18px', fontWeight: 'bold', marginBottom: '16px', display: 'flex', alignItems: 'center', gap: '8px', borderBottom: '1px solid #ecf0f1', paddingBottom: '12px' }}>
+              🌿 โซนแปลง 2
+            </h3>
+            <div style={styles.relayCardsContainer}>
+              {[4, 9, 10, 11].map((index) => (
+                <RelayCard
+                  key={index}
+                  index={index}
+                  relayNames={relayNames}
+                  relayModes={relayModes}
+                  statusData={statusData}
+                  changeRelayMode={changeRelayMode}
+                  handleAutoClick={handleAutoClick}
+                  toggleRelay={toggleRelay}
+                  relayConfigs={relayConfigs}
+                  espConnected={espConnected}
+                />
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* AUTO MODE CONFIG MODAL */}
+      {showAutoModal && pendingAutoRelayIndex !== null && (
+        <div style={styles.modalOverlay}>
+          <div style={styles.modal}>
+            <h2 style={styles.modalTitle}>⚙️ ตั้งค่าโหมดอัตโนมัติ</h2>
+            <p style={{ textAlign: 'center', color: '#666', marginBottom: '20px', fontSize: '14px' }}>
+              รีเลย์: <strong>{relayNames[pendingAutoRelayIndex]}</strong>
+            </p>
+
+            {/* Current Sensor Values Display */}
+            {currentSensorValues[pendingAutoRelayIndex] && (
+              (DUAL_SENSOR_RELAYS.includes(pendingAutoRelayIndex) || !!(relayConfigs[pendingAutoRelayIndex]?.target1)) ? (
+                <div style={{ display: 'flex', gap: '10px', marginBottom: '16px' }}>
+                  {[
+                    { val: currentSensorValues[pendingAutoRelayIndex]?.current_value1, param: currentSensorValues[pendingAutoRelayIndex]?.sensor1_name },
+                    { val: currentSensorValues[pendingAutoRelayIndex]?.current_value2, param: currentSensorValues[pendingAutoRelayIndex]?.sensor2_name }
+                  ].map((s, i) => {
+                    const info = getParamInfo(s.param);
+                    return (
+                      <div key={i} style={{ flex: 1, background: '#e3f2fd', borderRadius: '8px', padding: '10px', textAlign: 'center' }}>
+                        <div style={{ fontSize: '20px' }}>{info.icon}</div>
+                        <div style={{ fontSize: '11px', color: '#666' }}>{info.label}</div>
+                        <div style={{ fontSize: '18px', fontWeight: 'bold', color: '#1565c0' }}>
+                          {s.val ?? '-'} <span style={{ fontSize: '11px' }}>{info.unit}</span>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              ) : (
+                <div style={{ background: '#e3f2fd', borderRadius: '8px', padding: '12px', textAlign: 'center', marginBottom: '16px' }}>
+                  {(() => {
+                    const info = getParamInfo(currentSensorValues[pendingAutoRelayIndex]?.sensor_name);
+                    return (
+                      <>
+                        <div style={{ fontSize: '24px' }}>{info.icon}</div>
+                        <div style={{ fontSize: '12px', color: '#666' }}>{info.label}</div>
+                        <div style={{ fontSize: '22px', fontWeight: 'bold', color: '#1565c0' }}>
+                          {currentSensorValues[pendingAutoRelayIndex]?.current_value ?? '-'}
+                          <span style={{ fontSize: '13px' }}> {info.unit}</span>
+                        </div>
+                      </>
+                    );
+                  })()}
+                </div>
+              )
+            )}
+
+            {(DUAL_SENSOR_RELAYS.includes(pendingAutoRelayIndex) || !!(relayConfigs[pendingAutoRelayIndex]?.target1)) ? (
+              // Fan: Dual sensor config
+              <>
+                <div style={{ display: 'flex', gap: '10px', alignItems: 'flex-end', marginBottom: '10px', flexWrap: 'wrap' }}>
+                  <div style={{ flex: 1, minWidth: '120px' }}>
+                    <label style={styles.label}>เซ็นเซอร์ 1</label>
+                    <select style={styles.input} value={tempAutoConfig.param1 || 'temp'} onChange={(e) => setTempAutoConfig({ ...tempAutoConfig, param1: e.target.value })}>
+                      <option value="temp">🌡️ อุณหภูมิ (°C)</option>
+                      <option value="hum">💨 ความชื้นอากาศ (%)</option>
+                      <option value="lux">☀️ แสง (lx)</option>
+                      <option value="co2">🌬️ CO₂ (ppm)</option>
+                      <optgroup label="💧 ความชื้นดิน — แปลง 1">
+                        <option value="soil_hum">Sensor ดิน1 แปลง1 (%)</option>
+                        <option value="soil_2_hum">Sensor ดิน 2 แปลง1 (%)</option>
+                        <option value="s2_hum">Sensor ดิน 3 แปลง1 (%)</option>
+                      </optgroup>
+                      <optgroup label="💧 ความชื้นดิน — แปลง 2">
+                        <option value="s1_hum">Sensor ดิน 1 แปลง2 (%)</option>
+                        <option value="s3_hum">Sensor ดิน 2 แปลง2 (%)</option>
+                        <option value="s4_hum">Sensor ดิน 3 แปลง2 (%)</option>
+                      </optgroup>
+                    </select>
+                  </div>
+                  <div style={{ flex: 0.7, minWidth: '100px' }}>
+                    <label style={styles.label}>เงื่อนไข</label>
+                    <select style={styles.input} value={tempAutoConfig.condition1 || '>'} onChange={(e) => setTempAutoConfig({ ...tempAutoConfig, condition1: e.target.value })}>
+                      <option value=">">&gt; มากกว่า</option>
+                      <option value="<">&lt; น้อยกว่า</option>
+                    </select>
+                  </div>
+                  <div style={{ flex: 0.7, minWidth: '80px' }}>
+                    <label style={styles.label}>ค่า</label>
+                    <input type="number" style={styles.input} value={tempAutoConfig.target1 ?? ''} onChange={(e) => setTempAutoConfig({ ...tempAutoConfig, target1: e.target.value })} />
+                  </div>
+                </div>
+                <div style={{ textAlign: 'center', margin: '8px 0' }}>
+                  <select style={{ ...styles.input, width: 'auto', padding: '8px 16px', fontWeight: 'bold' }} value={tempAutoConfig.logic || '&&'} onChange={(e) => setTempAutoConfig({ ...tempAutoConfig, logic: e.target.value })}>
+                    <option value="&&">AND (และ)</option>
+                    <option value="||">OR (หรือ)</option>
+                  </select>
+                </div>
+                <div style={{ display: 'flex', gap: '10px', alignItems: 'flex-end', flexWrap: 'wrap' }}>
+                  <div style={{ flex: 1, minWidth: '120px' }}>
+                    <label style={styles.label}>เซ็นเซอร์ 2</label>
+                    <select style={styles.input} value={tempAutoConfig.param2 || 'hum'} onChange={(e) => setTempAutoConfig({ ...tempAutoConfig, param2: e.target.value })}>
+                      <option value="temp">🌡️ อุณหภูมิ (°C)</option>
+                      <option value="hum">💨 ความชื้นอากาศ (%)</option>
+                      <option value="lux">☀️ แสง (lx)</option>
+                      <option value="co2">🌬️ CO₂ (ppm)</option>
+                      <optgroup label="💧 ความชื้นดิน — แปลง 1">
+                        <option value="soil_hum">Sensor ดิน1 แปลง1 (%)</option>
+                        <option value="soil_2_hum">Sensor ดิน 2 แปลง1 (%)</option>
+                        <option value="s2_hum">Sensor ดิน 3 แปลง1 (%)</option>
+                      </optgroup>
+                      <optgroup label="💧 ความชื้นดิน — แปลง 2">
+                        <option value="s1_hum">Sensor ดิน 1 แปลง2 (%)</option>
+                        <option value="s3_hum">Sensor ดิน 2 แปลง2 (%)</option>
+                        <option value="s4_hum">Sensor ดิน 3 แปลง2 (%)</option>
+                      </optgroup>
+                    </select>
+                  </div>
+                  <div style={{ flex: 0.7, minWidth: '100px' }}>
+                    <label style={styles.label}>เงื่อนไข</label>
+                    <select style={styles.input} value={tempAutoConfig.condition2 || '>'} onChange={(e) => setTempAutoConfig({ ...tempAutoConfig, condition2: e.target.value })}>
+                      <option value=">">&gt; มากกว่า</option>
+                      <option value="<">&lt; น้อยกว่า</option>
+                    </select>
+                  </div>
+                  <div style={{ flex: 0.7, minWidth: '80px' }}>
+                    <label style={styles.label}>ค่า</label>
+                    <input type="number" style={styles.input} value={tempAutoConfig.target2 ?? ''} onChange={(e) => setTempAutoConfig({ ...tempAutoConfig, target2: e.target.value })} />
+                  </div>
+                </div>
+                <div style={styles.conditionPreview}>
+                  เปิดเมื่อ: ({tempAutoConfig.param1} {tempAutoConfig.condition1} {tempAutoConfig.target1}) {tempAutoConfig.logic} ({tempAutoConfig.param2} {tempAutoConfig.condition2} {tempAutoConfig.target2})
+                </div>
+              </>
+            ) : (
+              // Single sensor config
+              <>
                 <div style={styles.formGroup}>
-                  <p style={{margin: '0 0 15px 0', color: '#666', fontSize: '14px'}}>
-                    กรุณาตั้งค่าเงื่อนไขการทำงานอัตโนมัติ แล้วคลิก "บันทึก & เปิด AUTO"
-                  </p>
-
-                  {/* For Fan (relay 1) - Dual sensors */}
-                  {pendingAutoRelayIndex === 1 ? (
-                    <>
-                      <div style={{display: 'flex', gap: '12px', marginBottom: '15px'}}>
-                        {/* Sensor 1 */}
-                        <div style={{flex: 1, padding: '12px', backgroundColor: '#f0f8ff', borderRadius: '6px'}}>
-                          <div style={{...styles.label, backgroundColor: '#e3f2fd', padding: '6px', borderRadius: '4px', marginBottom: '8px', fontSize: '12px', fontWeight: 'bold', color: '#1565c0'}}>
-                            ปัจจุบัน: <strong>{currentSensorValues[1]?.current_value1 ?? '-'}</strong> {(currentSensorValues[1]?.sensor1_name === 'temp' ? '°C' : currentSensorValues[1]?.sensor1_name === 'hum' ? '%' : 'lux')}
-                          </div>
-                          <label style={styles.label}>เซนเซอร์ที่ 1:</label>
-                          <select 
-                            value={tempAutoConfig.param1 || 'temp'}
-                            onChange={(e) => setTempAutoConfig({...tempAutoConfig, param1: e.target.value})}
-                            style={styles.input}
-                          >
-                            <option value="temp">อุณหภูมิ (°C)</option>
-                            <option value="hum">ความชื้นอากาศ (%)</option>
-                            <option value="soil_hum">ความชื้นดิน (%)</option>
-                            <option value="lux">แสง (Lux)</option>
-                            <option value="co2">CO₂ (ppm)</option>
-                          </select>
-
-                          <label style={{...styles.label, marginTop: '10px'}}>เงื่อนไข:</label>
-                          <select 
-                            value={tempAutoConfig.condition1 || '>'}
-                            onChange={(e) => setTempAutoConfig({...tempAutoConfig, condition1: e.target.value})}
-                            style={styles.input}
-                          >
-                            <option value="<">น้อยกว่า (&lt;)</option>
-                            <option value=">">มากกว่า (&gt;)</option>
-                          </select>
-
-                          <label style={{...styles.label, marginTop: '10px'}}>ค่าเป้าหมาย:</label>
-                          <input 
-                            type="number" 
-                            value={tempAutoConfig.target1 || 0}
-                            onChange={(e) => setTempAutoConfig({...tempAutoConfig, target1: parseFloat(e.target.value)})}
-                            style={styles.input}
-                          />
-                        </div>
-
-                        {/* Sensor 2 */}
-                        <div style={{flex: 1, padding: '12px', backgroundColor: '#f5f0f8', borderRadius: '6px'}}>
-                          <div style={{...styles.label, backgroundColor: '#f3e5f5', padding: '6px', borderRadius: '4px', marginBottom: '8px', fontSize: '12px', fontWeight: 'bold', color: '#6a1b9a'}}>
-                            ปัจจุบัน: <strong>{currentSensorValues[1]?.current_value2 ?? '-'}</strong> {(currentSensorValues[1]?.sensor2_name === 'temp' ? '°C' : currentSensorValues[1]?.sensor2_name === 'hum' ? '%' : 'lux')}
-                          </div>
-                          <label style={styles.label}>เซนเซอร์ที่ 2:</label>
-                          <select 
-                            value={tempAutoConfig.param2 || 'hum'}
-                            onChange={(e) => setTempAutoConfig({...tempAutoConfig, param2: e.target.value})}
-                            style={styles.input}
-                          >
-                            <option value="temp">อุณหภูมิ (°C)</option>
-                            <option value="hum">ความชื้นอากาศ (%)</option>
-                            <option value="soil_hum">ความชื้นดิน (%)</option>
-                            <option value="lux">แสง (Lux)</option>
-                            <option value="co2">CO₂ (ppm)</option>
-                          </select>
-
-                          <label style={{...styles.label, marginTop: '10px'}}>เงื่อนไข:</label>
-                          <select 
-                            value={tempAutoConfig.condition2 || '>'}
-                            onChange={(e) => setTempAutoConfig({...tempAutoConfig, condition2: e.target.value})}
-                            style={styles.input}
-                          >
-                            <option value="<">น้อยกว่า (&lt;)</option>
-                            <option value=">">มากกว่า (&gt;)</option>
-                          </select>
-
-                          <label style={{...styles.label, marginTop: '10px'}}>ค่าเป้าหมาย:</label>
-                          <input 
-                            type="number" 
-                            value={tempAutoConfig.target2 || 0}
-                            onChange={(e) => setTempAutoConfig({...tempAutoConfig, target2: parseFloat(e.target.value)})}
-                            style={styles.input}
-                          />
-                        </div>
-                      </div>
-                      <div style={{...styles.conditionPreview, marginBottom: '15px'}}>
-                        ✓ ทำงานเมื่อ: ({tempAutoConfig.param1} {tempAutoConfig.condition1} {tempAutoConfig.target1}) หรือ ({tempAutoConfig.param2} {tempAutoConfig.condition2} {tempAutoConfig.target2})
-                      </div>
-                    </>
-                  ) : (
-                    /* Other relays - Single sensor */
-                    <>
-                      <div style={{backgroundColor: '#f0f8ff', padding: '10px', borderRadius: '6px', marginBottom: '12px'}}>
-                        <div style={{fontSize: '12px', fontWeight: 'bold', color: '#1565c0'}}>
-                          ปัจจุบัน: <strong style={{fontSize: '16px'}}>{currentSensorValues[pendingAutoRelayIndex]?.current_value ?? '-'}</strong> 
-                          {currentSensorValues[pendingAutoRelayIndex]?.sensor_name === 'soil_hum' ? '%' : 
-                           ['soil_2_hum', 's1_hum', 's2_hum', 's3_hum', 's4_hum'].includes(currentSensorValues[pendingAutoRelayIndex]?.sensor_name) ? '%' :
-                           currentSensorValues[pendingAutoRelayIndex]?.sensor_name === 'temp' ? '°C' : 
-                           currentSensorValues[pendingAutoRelayIndex]?.sensor_name === 'hum' ? '%' : 
-                           currentSensorValues[pendingAutoRelayIndex]?.sensor_name === 'lux' ? ' Lux' : ' ppm'}
-                        </div>
-                      </div>
-                      <label style={styles.label}>เซนเซอร์:</label>
-                      <select 
-                        value={tempAutoConfig.param || 'soil_hum'}
-                        onChange={(e) => setTempAutoConfig({...tempAutoConfig, param: e.target.value})}
-                        style={styles.input}
-                      >
-                        <option value="soil_hum">ความชื้นดิน (%)</option>
-                        <option value="soil_2_hum">ความชื้นดิน - 2 (%)</option>
-                        <option value="s1_hum">S1 Humidity (%)</option>
-                        <option value="s2_hum">S2 Humidity (%)</option>
-                        <option value="s3_hum">S3 Humidity (%)</option>
-                        <option value="s4_hum">S4 Humidity (%)</option>
-                        <option value="temp">อุณหภูมิ (°C)</option>
-                        <option value="hum">ความชื้นอากาศ (%)</option>
-                        <option value="lux">แสง (Lux)</option>
-                        <option value="co2">CO₂ (ppm)</option>
-                      </select>
-
-                      <label style={{...styles.label, marginTop: '10px'}}>เงื่อนไข:</label>
-                      <select 
-                        value={tempAutoConfig.condition || '<'}
-                        onChange={(e) => setTempAutoConfig({...tempAutoConfig, condition: e.target.value})}
-                        style={styles.input}
-                      >
-                        <option value="<">น้อยกว่า (&lt;)</option>
-                        <option value=">">มากกว่า (&gt;)</option>
-                      </select>
-
-                      <label style={{...styles.label, marginTop: '10px'}}>ค่าเป้าหมาย:</label>
-                      <input 
-                        type="number" 
-                        value={tempAutoConfig.target || 0}
-                        onChange={(e) => setTempAutoConfig({...tempAutoConfig, target: parseFloat(e.target.value)})}
-                        style={styles.input}
-                      />
-
-                      <div style={{...styles.conditionPreview, marginTop: '15px'}}>
-                        ✓ ทำงานเมื่อ: {tempAutoConfig.param} {tempAutoConfig.condition} {tempAutoConfig.target}
-                      </div>
-                    </>
-                  )}
+                  <label style={styles.label}>เซ็นเซอร์</label>
+                  <select style={styles.input} value={tempAutoConfig.param || 'soil_hum'} onChange={(e) => setTempAutoConfig({ ...tempAutoConfig, param: e.target.value })}>
+                    <option value="temp">🌡️ อุณหภูมิ (°C)</option>
+                    <option value="hum">💨 ความชื้นอากาศ (%)</option>
+                    <option value="lux">☀️ แสง (lx)</option>
+                    <option value="co2">🌬️ CO₂ (ppm)</option>
+                    <optgroup label="💧 ความชื้นดิน — แปลง 1">
+                      <option value="soil_hum">Sensor ดิน1 แปลง1 (%)</option>
+                      <option value="soil_2_hum">Sensor ดิน 2 แปลง1 (%)</option>
+                      <option value="s2_hum">Sensor ดิน 3 แปลง1 (%)</option>
+                    </optgroup>
+                    <optgroup label="💧 ความชื้นดิน — แปลง 2">
+                      <option value="s1_hum">Sensor ดิน 1 แปลง2 (%)</option>
+                      <option value="s3_hum">Sensor ดิน 2 แปลง2 (%)</option>
+                      <option value="s4_hum">Sensor ดิน 3 แปลง2 (%)</option>
+                    </optgroup>
+                  </select>
                 </div>
-
-                {/* Button Group */}
-                <div style={styles.buttonGroup}>
-                  <button
-                    onClick={handleCancelAutoModal}
-                    style={{...styles.saveButton, backgroundColor: '#95a5a6'}}
-                  >
-                    ยกเลิก
-                  </button>
-                  <button
-                    onClick={handleSaveAndActivateAuto}
-                    style={{...styles.saveButton, backgroundColor: '#27ae60'}}
-                  >
-                    💾 บันทึก & เปิด AUTO
-                  </button>
+                <div style={styles.formGroup}>
+                  <label style={styles.label}>เงื่อนไข</label>
+                  <select style={styles.input} value={tempAutoConfig.condition || '<'} onChange={(e) => setTempAutoConfig({ ...tempAutoConfig, condition: e.target.value })}>
+                    <option value=">">&gt; มากกว่า</option>
+                    <option value="<">&lt; น้อยกว่า</option>
+                  </select>
                 </div>
-              </div>
+                <div style={styles.formGroup}>
+                  <label style={styles.label}>ค่า</label>
+                  <input type="number" style={styles.input} value={tempAutoConfig.target ?? ''} onChange={(e) => setTempAutoConfig({ ...tempAutoConfig, target: e.target.value })} />
+                </div>
+                <div style={styles.conditionPreview}>
+                  เปิดเมื่อ: {tempAutoConfig.param} {tempAutoConfig.condition === '>' ? 'มากกว่า' : 'น้อยกว่า'} {tempAutoConfig.target}
+                </div>
+              </>
+            )}
+
+            <div style={styles.buttonGroup}>
+              <button onClick={handleSaveAndActivateAuto} style={{ ...styles.saveButton, backgroundColor: '#4caf50' }}>💾 บันทึก & เปิด Auto</button>
+              <button onClick={handleCancelAutoModal} style={{ ...styles.saveButton, backgroundColor: '#f44336' }}>✖ ยกเลิก</button>
             </div>
-          )}
+          </div>
         </div>
       )}
 
       {/* DATA TABLE TAB */}
       {activeTab === 'data' && (
-        <DataTablePage />
+        <DataTablePage espConnected={espConnected} />
       )}
 
       {/* GRAPH TAB */}
       {activeTab === 'graph' && (
-        <GraphPage />
+        <GraphPage espConnected={espConnected} />
       )}
     </div>
   );
@@ -1118,37 +1090,46 @@ const App = () => {
 /**
  * Sensor Card Component
  */
-const SensorCard = ({ title, value, unit, color, textColor = 'white' }) => (
-  <div style={{ ...styles.card, backgroundColor: color, color: textColor }}>
-    <h4 style={styles.cardTitle}>{title}</h4>
-    <h2 style={styles.cardValue}>
-      {typeof value === 'number' ? value.toFixed(1) : value}
-      <span style={styles.unit}> {unit}</span>
-    </h2>
-  </div>
-);
+const SensorCard = ({ title, value, unit, color, textColor = 'white' }) => {
+  const fresh = React.useContext(SensorFreshContext);
+  return (
+    <div style={{ ...styles.card, backgroundColor: color, color: textColor }}>
+      <h4 style={styles.cardTitle}>{title}</h4>
+      <h2 style={styles.cardValue}>
+        {fresh ? (typeof value === 'number' ? value.toFixed(1) : value) : '–'}
+        {fresh && <span style={styles.unit}> {unit}</span>}
+      </h2>
+    </div>
+  );
+};
 
 /**
  * Metric Card Component for NPK and advanced metrics
  */
-const MetricCard = ({ title, value, unit = '', range = '', color, textColor = 'white' }) => (
-  <div style={{ ...styles.metricCard, backgroundColor: color, color: textColor }}>
-    <h4 style={styles.metricTitle}>{title}</h4>
-    <h3 style={styles.metricValue}>
-      {typeof value === 'number' ? value.toFixed(1) : value}
-      {unit && <span style={styles.metricUnit}> {unit}</span>}
-    </h3>
-    {range && <p style={styles.metricRange}>{range}</p>}
-  </div>
-);
+const MetricCard = ({ title, value, unit = '', range = '', color, textColor = 'white' }) => {
+  const fresh = React.useContext(SensorFreshContext);
+  return (
+    <div style={{ ...styles.metricCard, backgroundColor: color, color: textColor }}>
+      <h4 style={styles.metricTitle}>{title}</h4>
+      <h3 style={styles.metricValue}>
+        {fresh ? (typeof value === 'number' ? value.toFixed(1) : value) : '–'}
+        {fresh && unit && <span style={styles.metricUnit}> {unit}</span>}
+      </h3>
+      {range && <p style={styles.metricRange}>{range}</p>}
+    </div>
+  );
+};
 
 // --- STYLES ---
 const styles = {
   container: {
-    padding: '20px',
+    padding: '1.5rem 2rem',
     fontFamily: "'Segoe UI', Tahoma, Geneva, Verdana, sans-serif",
     backgroundColor: '#f5f7fa',
-    minHeight: '100vh'
+    minHeight: '100vh',
+    maxWidth: '1800px',
+    margin: '0 auto',
+    boxSizing: 'border-box'
   },
   header: {
     display: 'flex',
@@ -1160,7 +1141,7 @@ const styles = {
   },
   title: {
     margin: 0,
-    fontSize: '2.5rem',
+    fontSize: '2rem',
     color: '#1a1a1a'
   },
   statusBadge: {
@@ -1189,11 +1170,11 @@ const styles = {
     borderBottom: '2px solid #e0e0e0'
   },
   tabButton: {
-    padding: '12px 20px',
+    padding: '0.75rem 1.25rem',
     border: 'none',
     borderBottom: '3px solid transparent',
     cursor: 'pointer',
-    fontSize: '14px',
+    fontSize: '0.95rem',
     fontWeight: 'bold',
     transition: 'all 0.3s ease',
     borderRadius: '8px 8px 0 0',
@@ -1237,11 +1218,12 @@ const styles = {
   cardTitle: {
     margin: 0,
     opacity: 0.9,
-    fontSize: '14px'
+    fontSize: '1rem',
+    fontWeight: '600'
   },
   cardValue: {
     margin: '12px 0 0 0',
-    fontSize: '2rem',
+    fontSize: '2.2rem',
     fontWeight: 'bold'
   },
   unit: {
@@ -1264,12 +1246,13 @@ const styles = {
   },
   metricTitle: {
     margin: 0,
-    fontSize: '12px',
-    opacity: 0.9
+    fontSize: '0.9rem',
+    opacity: 0.9,
+    fontWeight: '600'
   },
   metricValue: {
     margin: '8px 0',
-    fontSize: '1.5rem'
+    fontSize: '1.6rem'
   },
   metricUnit: {
     fontSize: '0.8rem',
@@ -1324,13 +1307,13 @@ const styles = {
   },
   relayCardsContainer: {
     display: 'grid',
-    gridTemplateColumns: 'repeat(auto-fit, minmax(250px, 1fr))',
-    gap: '20px',
+    gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))',
+    gap: '1.2rem',
     marginBottom: '20px'
   },
   relayCard: {
     backgroundColor: 'white',
-    padding: '20px',
+    padding: '1.2rem',
     borderRadius: '12px',
     boxShadow: '0 2px 8px rgba(0,0,0,0.1)',
     border: '3px solid #1976d2'
@@ -1345,7 +1328,7 @@ const styles = {
   },
   relayName: {
     margin: 0,
-    fontSize: '1.2rem',
+    fontSize: '1.05rem',
     color: '#1a1a1a',
     flex: 1
   },
@@ -1354,11 +1337,11 @@ const styles = {
     gap: '8px'
   },
   modeBtn: {
-    padding: '6px 12px',
+    padding: '0.4rem 0.75rem',
     border: 'none',
     borderRadius: '6px',
     cursor: 'pointer',
-    fontSize: '12px',
+    fontSize: '0.85rem',
     fontWeight: 'bold',
     transition: 'all 0.2s ease'
   },
@@ -1380,18 +1363,18 @@ const styles = {
   },
   statusLabel: {
     margin: 0,
-    fontSize: '14px',
+    fontSize: '0.9rem',
     color: '#666'
   },
   onLabel: {
     color: '#4caf50',
     fontWeight: 'bold',
-    fontSize: '16px'
+    fontSize: '1rem'
   },
   offLabel: {
     color: '#f44336',
     fontWeight: 'bold',
-    fontSize: '16px'
+    fontSize: '1rem'
   },
 
   // Modal Styles
@@ -1429,14 +1412,14 @@ const styles = {
     marginBottom: '6px',
     fontWeight: 'bold',
     color: '#333',
-    fontSize: '14px'
+    fontSize: '0.95rem'
   },
   input: {
     width: '100%',
-    padding: '10px',
+    padding: '0.6rem',
     borderRadius: '6px',
     border: '1px solid #ddd',
-    fontSize: '14px',
+    fontSize: '0.95rem',
     boxSizing: 'border-box'
   },
   conditionPreview: {
@@ -1476,10 +1459,10 @@ const styles = {
     fontSize: '12px'
   },
   toggleButton: {
-    padding: '15px 30px',
+    padding: '0.9rem 1.5rem',
     border: 'none',
     borderRadius: '8px',
-    fontSize: '16px',
+    fontSize: '1rem',
     fontWeight: 'bold',
     cursor: 'pointer',
     transition: 'all 0.3s ease',
@@ -1551,3 +1534,88 @@ styleSheet.textContent = `
 document.head.appendChild(styleSheet);
 
 export default App;
+
+const RelayCard = ({ index, relayNames, relayModes, statusData, changeRelayMode, handleAutoClick, toggleRelay, relayConfigs, espConnected = true }) => (
+  <div style={styles.relayCard}>
+    {/* Relay Header */}
+    <div style={styles.relayHeader}>
+      <h3 style={styles.relayName}>{relayNames[index]}</h3>
+      <div style={styles.relayModeSelector}>
+        <button
+          onClick={() => changeRelayMode(index, 'MANUAL')}
+          style={{
+            ...styles.modeBtn,
+            ...(relayModes[index] === 'MANUAL'
+              ? styles.modeBtnActive
+              : styles.modeBtnInactive)
+          }}
+        >
+          ⚙️ MANUAL
+        </button>
+        {/* ⭐ PUMP (0) & PLOT PUMP 2 (4): MANUAL ONLY */}
+        {(index !== 0 && index !== 4) && (
+          <button
+            onClick={() => handleAutoClick(index)}
+            style={{
+              ...styles.modeBtn,
+              ...(relayModes[index] === 'AUTO'
+                ? styles.modeBtnActive
+                : styles.modeBtnInactive)
+            }}
+          >
+            🤖 AUTO
+          </button>
+        )}
+      </div>
+    </div>
+
+    {/* Relay Status */}
+    <div style={styles.relayStatus}>
+      <p style={styles.statusLabel}>
+        Status: {espConnected ? (
+          <span style={statusData.relays[index] ? styles.onLabel : styles.offLabel}>
+            {statusData.relays[index] ? '◆ ON' : '⏻ OFF'}
+          </span>
+        ) : (
+          <span style={{ color: '#bbb', fontStyle: 'italic' }}>– ? (ไม่ทราบ)</span>
+        )}
+      </p>
+    </div>
+
+    {/* Mode-specific Content */}
+    {relayModes[index] === 'MANUAL' ? (
+      <div style={styles.manualMode}>
+        <p style={styles.modeLabel}>Manual Control (ควบคุมเอง)</p>
+        <button
+          onClick={() => toggleRelay(index)}
+          style={{
+            ...styles.toggleButton,
+            backgroundColor: !espConnected ? '#bdbdbd' : statusData.relays[index] ? '#f44336' : '#4caf50',
+            color: 'white',
+            opacity: espConnected ? 1 : 0.6,
+          }}
+        >
+          {!espConnected ? '⏻ ไม่ทราบสถานะ' : statusData.relays[index] ? '🔴 Turn OFF' : '🟢 Turn ON'}
+        </button>
+      </div>
+    ) : (
+      <div style={styles.autoMode}>
+        <p style={styles.modeLabel}>Auto Mode (อัตโนมัติ)</p>
+        <div style={styles.autoConfig}>
+          <p>IF Condition Triggered → Relay ON</p>
+          {index === 1 && relayConfigs[index].target1 !== undefined ? (
+            // Dual sensor config for Fan
+            <p style={styles.configText}>
+              ({relayConfigs[index].param1} {relayConfigs[index].condition1} {relayConfigs[index].target1}) {relayConfigs[index].logic} ({relayConfigs[index].param2} {relayConfigs[index].condition2} {relayConfigs[index].target2})
+            </p>
+          ) : (
+            // Single sensor config for other relays
+            <p style={styles.configText}>
+              Target: {relayConfigs[index].target} {relayConfigs[index].param}
+            </p>
+          )}
+        </div>
+      </div>
+    )}
+  </div>
+);

@@ -2,6 +2,26 @@ import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import AutomationPanel from '../components/AutomationPanel';
 
+const API_URL = `http://${window.location.hostname}:5000`;
+
+const PARAM_LABELS = {
+  soil_hum:  { label: 'ความชื้นดิน',   unit: '%',    icon: '🌱' },
+  soil_2_hum:{ label: 'ความชื้นดิน2',  unit: '%',    icon: '🌱' },
+  temp:      { label: 'อุณหภูมิ',       unit: '°C',   icon: '🌡️' },
+  hum:       { label: 'ความชื้นอากาศ', unit: '%',    icon: '💧' },
+  lux:       { label: 'แสง',           unit: 'lux',  icon: '☀️' },
+  co2:       { label: 'CO₂',           unit: 'ppm',  icon: '🌫️' },
+  s1_hum:    { label: 'ดิน S1',        unit: '%',    icon: '🌱' },
+  s1_ph:     { label: 'pH S1',         unit: '',     icon: '🧪' },
+  s2_hum:    { label: 'ดิน S2',        unit: '%',    icon: '🌱' },
+  s3_hum:    { label: 'ดิน S3',        unit: '%',    icon: '🌱' },
+  s4_hum:    { label: 'ดิน S4',        unit: '%',    icon: '🌱' },
+};
+
+function getParamInfo(param) {
+  return PARAM_LABELS[param] || { label: param, unit: '', icon: '📡' };
+}
+
 export default function AutomationPage({ displayData, onSaveConfig, isSidebarOpen }) {
   const [relayConfigs, setRelayConfigs] = useState({});
   const [loading, setLoading] = useState(true);
@@ -14,7 +34,7 @@ export default function AutomationPage({ displayData, onSaveConfig, isSidebarOpe
   useEffect(() => {
     const fetchConfigs = async () => {
       try {
-        const response = await fetch('http://localhost:5000/api/relay-configs');
+        const response = await fetch(`${API_URL}/api/relay-configs`);
         const data = await response.json();
         setRelayConfigs(data);
         setLoading(false);
@@ -36,8 +56,8 @@ export default function AutomationPage({ displayData, onSaveConfig, isSidebarOpe
     // Extract only the editable fields (ignore API metadata like current_value, sensor_name)
     let cleanConfig = {};
     
-    if (index === 1 && config.target1) {
-      // Dual sensor config (Fan)
+    if (config.target1) {
+      // Dual sensor config (Fan / Valve1 P1 / Valve1 P2)
       cleanConfig = {
         param1: config.param1 || 'temp',
         condition1: config.condition1 || '>',
@@ -95,7 +115,7 @@ export default function AutomationPage({ displayData, onSaveConfig, isSidebarOpe
       console.log(`📤 Sending clean config to backend:`, configToSend);
       
       // STEP 1: Save config to backend
-      const configResponse = await fetch('http://localhost:5000/api/relay-configs', {
+      const configResponse = await fetch(`${API_URL}/api/relay-configs`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(configToSend)
@@ -109,14 +129,14 @@ export default function AutomationPage({ displayData, onSaveConfig, isSidebarOpe
       const configResult = await configResponse.json();
       console.log(`✅ Config saved for relay ${selectedRelayIndex}:`, configResult);
       
-      // Update local state with clean config
-      setRelayConfigs({
-        ...relayConfigs,
-        [selectedRelayIndex]: {...tempConfig}
-      });
+      // Update local state — merge tempConfig into existing entry to preserve current_value
+      setRelayConfigs(prev => ({
+        ...prev,
+        [selectedRelayIndex]: { ...(prev[selectedRelayIndex] || {}), ...tempConfig }
+      }));
       
       // STEP 2: Enable AUTO mode
-      const modeResponse = await fetch('http://localhost:5000/api/relay-modes', {
+      const modeResponse = await fetch(`${API_URL}/api/relay-modes`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ index: selectedRelayIndex, mode: 'AUTO' })
@@ -168,7 +188,20 @@ export default function AutomationPage({ displayData, onSaveConfig, isSidebarOpe
           const idx = parseInt(relayIndex);
           const cfg = relayConfigs[relayIndex];
           const relayStatus = displayData.relay?.[idx] || false;
-          
+          const isDual = !!cfg.target1;
+
+          // current sensor value(s) from API response
+          const cv1 = isDual ? cfg.current_value1 : cfg.current_value;
+          const cv2 = isDual ? cfg.current_value2 : null;
+          const p1  = isDual ? cfg.param1 : cfg.param;
+          const p2  = isDual ? cfg.param2 : null;
+          const info1 = getParamInfo(p1);
+          const info2 = p2 ? getParamInfo(p2) : null;
+
+          const condStr = isDual
+            ? `${info1.icon}${cfg.target1}${cfg.condition1} / ${info2?.icon}${cfg.target2}${cfg.condition2}`
+            : `${info1.icon} ${cfg.condition}${cfg.target} ${info1.unit}`;
+
           return (
             <button
               key={idx}
@@ -176,11 +209,27 @@ export default function AutomationPage({ displayData, onSaveConfig, isSidebarOpe
               className="p-4 rounded-lg border-2 border-slate-200 hover:border-blue-500 bg-white hover:bg-blue-50 transition-all text-left"
             >
               <div className="font-semibold text-sm">{RELAY_NAMES[idx]}</div>
-              <div className={`text-xs mt-1 ${relayStatus ? 'text-green-600' : 'text-slate-500'}`}>
+              <div className={`text-xs mt-1 font-bold ${relayStatus ? 'text-green-600' : 'text-slate-400'}`}>
                 {relayStatus ? '◆ ON' : '○ OFF'}
               </div>
-              <div className="text-xs text-slate-600 mt-2">
-                {cfg.target1 ? `${cfg.target1} ${cfg.condition1}` : `${cfg.target} ${cfg.condition}`}
+
+              {/* Current sensor value */}
+              <div className="mt-2 space-y-1">
+                <div className="flex items-center justify-between text-xs">
+                  <span className="text-slate-500">{info1.icon} ค่าตอนนี้</span>
+                  <span className="font-bold text-blue-700">{cv1 ?? '-'} {info1.unit}</span>
+                </div>
+                {info2 && (
+                  <div className="flex items-center justify-between text-xs">
+                    <span className="text-slate-500">{info2.icon} ค่าตอนนี้</span>
+                    <span className="font-bold text-indigo-700">{cv2 ?? '-'} {info2.unit}</span>
+                  </div>
+                )}
+              </div>
+
+              {/* Target setting */}
+              <div className="mt-2 pt-2 border-t border-slate-100 text-xs text-slate-500 truncate">
+                🎯 {condStr}
               </div>
             </button>
           );
@@ -192,7 +241,46 @@ export default function AutomationPage({ displayData, onSaveConfig, isSidebarOpe
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
           <div className="bg-white rounded-lg p-6 max-w-md w-full">
             <h3 className="text-xl font-bold mb-4">{RELAY_NAMES[selectedRelayIndex]}</h3>
-            
+
+            {/* ค่าเซนเซอร์ปัจจุบัน */}
+            {(() => {
+              const cfg = relayConfigs[selectedRelayIndex] || {};
+              const isDual = !!cfg.target1;
+              if (isDual) {
+                const i1 = getParamInfo(cfg.param1);
+                const i2 = getParamInfo(cfg.param2);
+                return (
+                  <div className="flex gap-2 mb-4">
+                    <div className="flex-1 bg-blue-50 border border-blue-200 rounded-lg p-3 text-center">
+                      <div className="text-lg">{i1.icon}</div>
+                      <div className="text-xs text-slate-500">{i1.label}</div>
+                      <div className="text-xl font-bold text-blue-700">{cfg.current_value1 ?? '-'}</div>
+                      <div className="text-xs text-slate-400">{i1.unit}</div>
+                    </div>
+                    <div className="flex-1 bg-indigo-50 border border-indigo-200 rounded-lg p-3 text-center">
+                      <div className="text-lg">{i2.icon}</div>
+                      <div className="text-xs text-slate-500">{i2.label}</div>
+                      <div className="text-xl font-bold text-indigo-700">{cfg.current_value2 ?? '-'}</div>
+                      <div className="text-xs text-slate-400">{i2.unit}</div>
+                    </div>
+                  </div>
+                );
+              } else {
+                const i1 = getParamInfo(cfg.param);
+                return (
+                  <div className="bg-blue-50 border border-blue-200 rounded-lg p-3 mb-4 flex items-center gap-3">
+                    <div className="text-3xl">{i1.icon}</div>
+                    <div>
+                      <div className="text-xs text-slate-500">{i1.label} ปัจจุบัน</div>
+                      <div className="text-2xl font-bold text-blue-700">
+                        {cfg.current_value ?? '-'} <span className="text-sm font-normal text-slate-500">{i1.unit}</span>
+                      </div>
+                    </div>
+                  </div>
+                );
+              }
+            })()}
+
             <div className="space-y-4">
               {tempConfig.target1 ? (
                 <>
@@ -208,7 +296,7 @@ export default function AutomationPage({ displayData, onSaveConfig, isSidebarOpe
                     </select>
                   </div>
                   <div>
-                    <label className="block text-sm font-semibold mb-1">ค่า 1</label>
+                    <label className="block text-sm font-semibold mb-1">ค่า 1 ({getParamInfo(tempConfig.param1 || 'temp').unit})</label>
                     <input 
                       type="number" 
                       value={tempConfig.target1 || 0} 
@@ -228,7 +316,7 @@ export default function AutomationPage({ displayData, onSaveConfig, isSidebarOpe
                     </select>
                   </div>
                   <div>
-                    <label className="block text-sm font-semibold mb-1">ค่า 2</label>
+                    <label className="block text-sm font-semibold mb-1">ค่า 2 ({getParamInfo(tempConfig.param2 || 'hum').unit})</label>
                     <input 
                       type="number" 
                       value={tempConfig.target2 || 0} 
@@ -251,7 +339,7 @@ export default function AutomationPage({ displayData, onSaveConfig, isSidebarOpe
                     </select>
                   </div>
                   <div>
-                    <label className="block text-sm font-semibold mb-1">ค่าเป้าหมาย</label>
+                    <label className="block text-sm font-semibold mb-1">ค่าเป้าหมาย ({getParamInfo(tempConfig.param || 'soil_hum').unit})</label>
                     <input 
                       type="number" 
                       value={tempConfig.target || 0} 
