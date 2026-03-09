@@ -143,22 +143,22 @@ logger.info(f"📋 Initial relay_configs (defaults): {relay_configs}")
 
 # ⭐⭐⭐ CLEAN: BARE BINARY DEFAULTS - NO HYSTERESIS ⭐⭐⭐
 relay_configs = {
-    0: {'target': 35.0, 'condition': '<', 'param': 'soil_hum'},  # Relay 0 - Pump
+    0: {'target': 35.0, 'condition': '<', 'param': 'soil_hum'},       # Relay 0  - ปั้มแปล1 (ดิน 2 แปล1 - SN-3002)
     1: {
         'target1': 28.0, 'condition1': '>', 'param1': 'temp',
         'target2': 75.0, 'condition2': '>', 'param2': 'hum',
         'logic': 'OR'
     },  # Relay 1 - Fan: Dual sensor (temp OR humidity)
-    2: {'target': 200.0, 'condition': '<', 'param': 'lux'},  # Relay 2 - Lamp
-    3: {'target': 60.0, 'condition': '<', 'param': 'hum'},  # Relay 3 - Mist (air humidity)
-    4: {'target': 35.0, 'condition': '<', 'param': 'soil_hum'},  # Relay 4 - Plot Pump 2
-    5: {'target': 35.0, 'condition': '<', 'param': 'soil_hum'},  # Relay 5 - EvapPump
-    6: {'target': 50.0, 'condition': '<', 'param': 'soil_hum'},  # Relay 6 - Valve1 P1: Single sensor
-    7: {'target': 50.0, 'condition': '<', 'param': 'soil_hum'},  # Relay 7 - Valve2 P1 (soil humidity)
-    8: {'target': 50.0, 'condition': '<', 'param': 'soil_hum'},  # Relay 8 - Valve3 P1
-    9: {'target': 50.0, 'condition': '<', 'param': 'soil_hum'},  # Relay 9 - Valve1 P2: Single sensor
-    10: {'target': 150.0, 'condition': '<', 'param': 'lux'},  # Relay 10 - Valve2 P2
-    11: {'target': 50.0, 'condition': '<', 'param': 'soil_hum'}  # Relay 11 - Valve3 P2 (FIXED: condition < not >)
+    2: {'target': 200.0, 'condition': '<', 'param': 'lux'},              # Relay 2  - ไฟส่องสว่าง
+    3: {'target': 60.0,  'condition': '<', 'param': 'hum'},              # Relay 3  - พ่นหมอก (ความชื้นอากาศ)
+    4: {'target': 35.0, 'condition': '<', 'param': 's1_hum'},            # Relay 4  - ปั้มแปล2 (ดิน 2 แปล2 - Node3 S1)
+    5: {'target': 35.0, 'condition': '<', 'param': 'soil_hum'},          # Relay 5  - EvapPump (ดิน 2 แปล1)
+    6: {'target': 50.0, 'condition': '<', 'param': 'soil_moisture_1'},   # Relay 6  - วาล์ว1 (ดิน 1 แปล1 - SN-300SD)
+    7: {'target': 50.0, 'condition': '<', 'param': 's2_hum'},            # Relay 7  - วาล์ว2 (ดิน 3 แปล1 - Node3 S2)
+    8: {'target': 50.0, 'condition': '<', 'param': 's3_hum'},            # Relay 8  - วาล์ว3 (ดิน 1 แปล2 - Node3 S3)
+    9: {'target': 50.0, 'condition': '<', 'param': 's1_hum'},            # Relay 9  - วาล์ว1-P2 (ดิน 2 แปล2 - Node3 S1)
+    10: {'target': 50.0, 'condition': '<', 'param': 's4_hum'},           # Relay 10 - วาล์ว2-P2 (ดิน 3 แปล2 - Node3 S4)
+    11: {'target': 50.0, 'condition': '<', 'param': 's4_hum'}            # Relay 11 - วาล์ว3-P2 (ดิน 3 แปล2 - Node3 S4)
 }
 logger.info(f"📋 Relay configs (BINARY - NO HYSTERESIS): {relay_configs}")
 
@@ -199,7 +199,6 @@ RELAY_TURN_OFF_DELAY_SECONDS = 0  # Binary: Turn OFF immediately when condition 
 # ⭐ TARGETED ANTI-CHATTER HOLD TIMES (seconds)
 # Valve relays (6-11) now use PULSE MODE instead of hold time — set to 0
 RELAY_MIN_HOLD_SECONDS = {
-    3: 25,   # Mist: avoid short pulses
 }
 
 def get_relay_min_hold_seconds(relay_index):
@@ -210,7 +209,7 @@ def get_relay_min_hold_seconds(relay_index):
 # Valve relays run in 10s ON / 10s OFF cycles while sensor condition is active
 # Immediately OFF when sensor crosses threshold
 PULSE_RELAYS = {6, 7, 8, 9, 10, 11}
-PULSE_ON_SECONDS  = 10   # เปิด 10 วินาที
+PULSE_ON_SECONDS  = 60   # เปิด 60 วินาที (1 นาที)
 PULSE_OFF_SECONDS = 10   # ปิด 10 วินาที
 
 # phase: 'IDLE' | 'ON' | 'OFF'
@@ -259,16 +258,17 @@ def evaluate_pulse(relay_index, should_turn_on, current_relay_state):
 # Prevents oscillation by using absolute values calibrated per sensor type
 # ⭐ OPTIMIZED FOR NOISY SENSORS: Balanced margins to prevent oscillation without losing control
 SENSOR_MARGINS = {
-    'temp': 0.0,        # Temperature: pure binary (OFF immediately when crosses threshold)
-    'hum': 0.0,         # Humidity: pure binary
-    'lux': 0.0,         # Light: pure binary
-    'soil_hum': 0.0,    # Soil Humidity: pure binary
-    'soil_2_hum': 0.0,  # Soil 2 Humidity: pure binary
-    'ph': 0.0,          # pH: pure binary
-    'co2': 0.0,         # CO2: pure binary
-    'n': 0.0,           # Nitrogen: pure binary
-    'p': 0.0,           # Phosphorus: pure binary
-    'k': 0.0            # Potassium: pure binary
+    'temp': 0.0,             # Temperature: pure binary (OFF immediately when crosses threshold)
+    'hum': 0.0,              # Humidity: pure binary
+    'lux': 0.0,              # Light: pure binary
+    'soil_hum': 0.0,         # Soil Humidity: pure binary
+    'soil_2_hum': 0.0,       # Soil 2 Humidity: pure binary
+    'soil_moisture_1': 0.0,  # Soil Moisture 1 (SN-300SD): pure binary
+    'ph': 0.0,               # pH: pure binary
+    'co2': 0.0,              # CO2: pure binary
+    'n': 0.0,                # Nitrogen: pure binary
+    'p': 0.0,                # Phosphorus: pure binary
+    'k': 0.0                 # Potassium: pure binary
 }
 
 def get_sensor_margin(param):
@@ -856,13 +856,14 @@ def evaluate_auto_mode(normalized_sensors):
                 logic = str(config.get('logic', 'OR')).strip().upper()  # Default to OR
 
                 sensor_dict = {
-                    'soil_hum': soil_hum,       # Average of soil_1 & soil_2 (Node 1)
-                    'soil_2_hum': soil_2_hum,   # Node 1 Soil 2 humidity (matches frontend param)
+                    'soil_hum': soil_hum,               # Average of soil_1 & soil_2 (Node 1)
+                    'soil_2_hum': soil_2_hum,           # Node 1 Soil 2 humidity
+                    'soil_moisture_1': soil_2_hum,      # ดิน 1 แปลง 1 (SN-300SD) = soil_2.hum
                     'temp': air_temp, 
                     'hum': air_hum, 
                     'lux': lux, 
                     'co2': co2,
-                    'soil_2': soil_2_hum,       # Alias for backward compat
+                    'soil_2': soil_2_hum,               # Alias for backward compat
                     's1_hum': s1_hum,           # Node 3 S1 Hum
                     's1_ph': s1_ph,             # Node 3 S1 pH
                     's1_n': s1_n,               # Node 3 S1 N
@@ -942,13 +943,14 @@ def evaluate_auto_mode(normalized_sensors):
                 param = str(config.get('param', 'soil_hum')).strip()
 
                 sensor_dict = {
-                    'soil_hum': soil_hum,       # Average of soil_1 & soil_2 (Node 1)
-                    'soil_2_hum': soil_2_hum,   # Node 1 Soil 2 humidity (matches frontend param)
+                    'soil_hum': soil_hum,               # Average of soil_1 & soil_2 (Node 1)
+                    'soil_2_hum': soil_2_hum,           # Node 1 Soil 2 humidity
+                    'soil_moisture_1': soil_2_hum,      # ดิน 1 แปลง 1 (SN-300SD) = soil_2.hum
                     'temp': air_temp, 
                     'hum': air_hum, 
                     'lux': lux, 
                     'co2': co2,
-                    'soil_2': soil_2_hum,       # Alias for backward compat
+                    'soil_2': soil_2_hum,               # Alias for backward compat
                     's1_hum': s1_hum,           # Node 3 S1 Hum
                     's1_ph': s1_ph,             # Node 3 S1 pH
                     's1_n': s1_n,               # Node 3 S1 N
@@ -1628,12 +1630,15 @@ def get_relay_configs():
 def get_sensor_value(sensors, node3_soil, param):
     """Helper function to extract sensor value by parameter name"""
     if param == 'soil_hum':
-        # Average of soil_1 and soil_2
+        # soil_1.hum = ดิน 2 แปล1 (SN-3002, Node1)
         soil_1_hum = sensors.get('soil_1', {}).get('hum', 0)
         soil_2_hum = sensors.get('soil_2', {}).get('hum', 0)
         if soil_1_hum and soil_2_hum:
             return (soil_1_hum + soil_2_hum) / 2
         return soil_1_hum or soil_2_hum or 0
+    elif param == 'soil_moisture_1':
+        # soil_2.hum = ดิน 1 แปล1 (SN-300SD, Node1)
+        return sensors.get('soil_2', {}).get('hum', 0) or 0
     elif param == 'soil_2':
         return sensors.get('soil_2', {}).get('hum', 0)
     elif param == 'temp':
@@ -1708,7 +1713,7 @@ def set_relay_config():
             
             logic = data.get('logic', 'OR')
             
-            valid_params = ['soil_hum', 'soil_2_hum', 'temp', 'hum', 'lux', 'co2', 'soil_2', 's1_hum', 's1_ph', 's1_n', 's1_p', 's1_k', 's2_hum', 's3_hum', 's4_hum']
+            valid_params = ['soil_hum', 'soil_moisture_1', 'soil_2_hum', 'temp', 'hum', 'lux', 'co2', 'soil_2', 's1_hum', 's1_ph', 's1_n', 's1_p', 's1_k', 's2_hum', 's3_hum', 's4_hum']
             if param1 not in valid_params or param2 not in valid_params:
                 return jsonify({"status": "error", "message": f"Parameter must be one of {valid_params}"}), 400
             
@@ -1748,7 +1753,7 @@ def set_relay_config():
                 logger.error(f"❌ Invalid condition: {condition!r} (expected '<' or '>')")
                 return jsonify({"status": "error", "message": "Condition must be < or >"}), 400
             
-            valid_params = ['soil_hum', 'soil_2_hum', 'temp', 'hum', 'lux', 'co2', 'soil_2', 's1_hum', 's1_ph', 's1_n', 's1_p', 's1_k', 's2_hum', 's3_hum', 's4_hum']
+            valid_params = ['soil_hum', 'soil_moisture_1', 'soil_2_hum', 'temp', 'hum', 'lux', 'co2', 'soil_2', 's1_hum', 's1_ph', 's1_n', 's1_p', 's1_k', 's2_hum', 's3_hum', 's4_hum']
             if param not in valid_params:
                 return jsonify({"status": "error", "message": f"Parameter must be one of {valid_params}"}), 400
             

@@ -31,9 +31,9 @@ PubSubClient mqtt_client(espClient);
 #define S2_CTRL 5
 
 // Sensor 3 (Software Serial)
-#define S3_RX 25
-#define S3_TX 26
-#define S3_CTRL 27
+#define S3_RX 34
+#define S3_TX 13
+#define S3_CTRL 15
 
 // Sensor 4 (Software Serial)
 #define S4_RX 16
@@ -152,12 +152,18 @@ void loop() {
   uint16_t soil_1_n = 0, soil_1_p = 0, soil_1_k = 0;
   bool success = true;
   
-  // ⭐ Read S1 (Hardware Serial) - SN-3002 7-in-1 sensor with NPK
-  node1.clearResponseBuffer();
-  uint8_t res1 = node1.readHoldingRegisters(0x0000, 7);  // Read 7 registers: HUM, TEMP, EC, pH, N, P, K
+  // ⭐ Read S1 (Hardware Serial) - Register layout: moisture(0), temp(1), EC(2), pH(3), N(4), P(5), K(6)
+  uint8_t res1 = node1.ku8MBIllegalDataAddress;
+  for (int attempt = 0; attempt < 3; attempt++) {
+    node1.clearResponseBuffer();
+    res1 = node1.readHoldingRegisters(0x0000, 7);  // Read 7 registers: moisture, temp, EC, pH, N, P, K
+    if (res1 == node1.ku8MBSuccess) break;
+    delay(200);
+  }
   if (res1 == node1.ku8MBSuccess) {
-    soil_1 = node1.getResponseBuffer(0) / 10.0;        // Humidity
-    soil_1_ph = node1.getResponseBuffer(3) / 10.0;     // pH
+    soil_1 = node1.getResponseBuffer(0) / 10.0;  // factory default
+    uint16_t raw_ph = node1.getResponseBuffer(3);          // pH at index 3
+    soil_1_ph = (raw_ph > 0) ? (raw_ph / 10.0f) : 0.0f;  // factory default
     soil_1_n = node1.getResponseBuffer(4);             // Nitrogen
     soil_1_p = node1.getResponseBuffer(5);             // Phosphorus
     soil_1_k = node1.getResponseBuffer(6);             // Potassium
@@ -170,15 +176,18 @@ void loop() {
   }
   delay(500);
 
-  // ⭐ Read S2 (Software Serial) - SN-300SD (like in Node 1)
+  // ⭐ Read S2 (Software Serial) - SN-300SD
   swSer2.listen();
-  delay(150);
-  node2.clearResponseBuffer();
-  uint8_t res2 = node2.readHoldingRegisters(0x0000, 2);
+  delay(250);
+  uint8_t res2 = node2.ku8MBIllegalDataAddress;
+  for (int attempt = 0; attempt < 3; attempt++) {
+    node2.clearResponseBuffer();
+    res2 = node2.readHoldingRegisters(0x0000, 1);
+    if (res2 == node2.ku8MBSuccess) break;
+    delay(200);
+  }
   if (res2 == node2.ku8MBSuccess) {
-    uint16_t val = node2.getResponseBuffer(1);
-    if (val == 0) val = node2.getResponseBuffer(0);
-    soil_2 = val / 10.0;
+    soil_2 = node2.getResponseBuffer(0) / 10.0;  // factory default
     Serial.print("[S2] "); Serial.print(soil_2); Serial.println(" %");
   } else {
     Serial.print("[S2] Error: "); Serial.println(res2, HEX);
@@ -186,31 +195,37 @@ void loop() {
   }
   delay(500);
 
-  // ⭐ Read S3 (Software Serial) - SN-300SD (broken sensor, skip gracefully)
+  // ⭐ Read S3 (Software Serial) - SN-300SD (GPIO 34/13/15)
   swSer3.listen();
-  delay(150);
-  node3.clearResponseBuffer();
-  uint8_t res3 = node3.readHoldingRegisters(0x0000, 2);
+  delay(250);
+  uint8_t res3 = node3.ku8MBIllegalDataAddress;
+  for (int attempt = 0; attempt < 3; attempt++) {
+    node3.clearResponseBuffer();
+    res3 = node3.readHoldingRegisters(0x0000, 1);
+    if (res3 == node3.ku8MBSuccess) break;
+    delay(200);
+  }
   if (res3 == node3.ku8MBSuccess) {
-    uint16_t val = node3.getResponseBuffer(1);
-    if (val == 0) val = node3.getResponseBuffer(0);
-    soil_3 = val / 10.0;
+    soil_3 = node3.getResponseBuffer(0) / 10.0;  // factory default
     Serial.print("[S3] "); Serial.print(soil_3); Serial.println(" %");
   } else {
-    Serial.print("[S3] ⚠️  SKIPPED (broken sensor) - Error: "); Serial.println(res3, HEX);
+    Serial.print("[S3] Error: "); Serial.println(res3, HEX);
     soil_3 = 0.0;
   }
   delay(500);
 
-  // ⭐ Read S4 (Software Serial) - SN-300SD (like in Node 1)
+  // ⭐ Read S4 (Software Serial) - SN-300SD (GPIO 16/17/4)
   swSer4.listen();
-  delay(150);
-  node4.clearResponseBuffer();
-  uint8_t res4 = node4.readHoldingRegisters(0x0000, 2);
+  delay(250);
+  uint8_t res4 = node4.ku8MBIllegalDataAddress;
+  for (int attempt = 0; attempt < 3; attempt++) {
+    node4.clearResponseBuffer();
+    res4 = node4.readHoldingRegisters(0x0000, 1);
+    if (res4 == node4.ku8MBSuccess) break;
+    delay(200);
+  }
   if (res4 == node4.ku8MBSuccess) {
-    uint16_t val = node4.getResponseBuffer(1);
-    if (val == 0) val = node4.getResponseBuffer(0);
-    soil_4 = val / 10.0;
+    soil_4 = node4.getResponseBuffer(0) / 10.0;  // factory default
     Serial.print("[S4] "); Serial.print(soil_4); Serial.println(" %");
   } else {
     Serial.print("[S4] Error: "); Serial.println(res4, HEX);

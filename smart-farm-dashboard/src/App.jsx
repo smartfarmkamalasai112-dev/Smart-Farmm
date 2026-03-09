@@ -24,8 +24,9 @@ const DUAL_SENSOR_RELAYS = [1];
 
 // Sensor param labels/icons/units for display
 const PARAM_INFO = {
-  soil_hum:   { label: 'ความชื้นดิน',   unit: '%',   icon: '🌱' },
-  soil_2_hum: { label: 'ความชื้นดิน2',  unit: '%',   icon: '🌱' },
+  soil_hum:        { label: 'ดิน 2 แปลง 1 (SN-3002)',   unit: '%',   icon: '🌱' },
+  soil_2_hum:      { label: 'ความชื้นดิน2',             unit: '%',   icon: '🌱' },
+  soil_moisture_1: { label: 'ดิน 1 แปลง 1 (SN-300SD)', unit: '%',   icon: '🌱' },
   temp:       { label: 'อุณหภูมิ',       unit: '°C',  icon: '🌡️' },
   hum:        { label: 'ความชื้นอากาศ', unit: '%',   icon: '💧' },
   lux:        { label: 'แสง',           unit: 'lux', icon: '☀️' },
@@ -52,8 +53,12 @@ const App = () => {
   const [connectionMessage, setConnectionMessage] = useState('Connecting to server...');
   const socketRef = useRef(null);
 
-  // ESP32 sensor freshness — false until real MQTT data arrives
-  const [espConnected, setEspConnected] = useState(false);
+  // ESP32 sensor freshness — separate tracking for each node
+  const [node1Connected, setNode1Connected] = useState(false);  // Node 1: main sensors
+  const [node3Connected, setNode3Connected] = useState(false);  // Node 3: Plot 2 soil
+  const [lastNode1Update, setLastNode1Update] = useState(Date.now());
+  const [lastNode3Update, setLastNode3Update] = useState(Date.now());
+  
   // Delay banner: don't show ESP warning for first 4s after page load (cold-start)
   const [espReady, setEspReady] = useState(false);
   useEffect(() => { const t = setTimeout(() => setEspReady(true), 4000); return () => clearTimeout(t); }, []);
@@ -170,6 +175,8 @@ const App = () => {
         switch(param) {
           case 'soil_hum':
             return ((sensorData.soil_1?.hum || 0) + (sensorData.soil_2?.hum || 0)) / 2;
+          case 'soil_moisture_1':
+            return sensorData.soil_2?.hum || 0;  // ดิน 1 แปลง 1 (SN-300SD)
           case 'soil_2_hum':
             return sensorData.soil_2?.hum || 0;
           case 's1_hum':
@@ -216,6 +223,27 @@ const App = () => {
       setCurrentSensorValues(newValues);
     }
   }, [sensorData, soilSensors, showAutoModal, pendingAutoRelayIndex, tempAutoConfig]);
+
+  // ⭐ Monitor Node timeouts (30s) and set disconnected state
+  useEffect(() => {
+    const interval = setInterval(() => {
+      const now = Date.now();
+      
+      // Node 1 timeout check
+      if (now - lastNode1Update > 30000 && node1Connected) {
+        console.warn('⚠️ Node 1 timeout');
+        setNode1Connected(false);
+      }
+      
+      // Node 3 timeout check (90s - Node 3 reads 4 sensors slowly)
+      if (now - lastNode3Update > 90000 && node3Connected) {
+        console.warn('⚠️ Node 3 timeout');
+        setNode3Connected(false);
+      }
+    }, 1000);
+    
+    return () => clearInterval(interval);
+  }, [lastNode1Update, lastNode3Update, node1Connected, node3Connected]);
 
   // Initialize SocketIO connection
   useEffect(() => {
@@ -270,7 +298,8 @@ const App = () => {
           });
           // ⭐ Set ESP freshness immediately from status (no need to wait for socket event)
           if (typeof data.sensor_fresh === 'boolean') {
-            setEspConnected(data.sensor_fresh);
+            setNode1Connected(data.sensor_fresh);
+            setLastNode1Update(Date.now());
           }
         })
         .catch(err => console.error('❌ Failed to fetch initial status:', err));
@@ -355,8 +384,9 @@ const App = () => {
     socket.on('sensor_update', (newData) => {
       console.log('📡 Sensor Update:', newData);
 
-      // Update ESP32 freshness flag
-      setEspConnected(newData._fresh !== false);
+      // Update Node 1 freshness flag
+      setNode1Connected(newData._fresh !== false);
+      setLastNode1Update(Date.now());
       
       // Validate and update sensor data with fallbacks
       setSensorData(prev => ({
@@ -402,6 +432,8 @@ const App = () => {
     // ⭐ NEW: Soil Sensors from Node 3 (real-time update)
     socket.on('soil_sensors_update', (newSoilData) => {
       console.log('🌱 Soil Sensors Update:', newSoilData);
+      setNode3Connected(true);
+      setLastNode3Update(Date.now());
       setSoilSensors(prev => ({
         soil_1: newSoilData.soil_1 ?? prev.soil_1,
         soil_2: newSoilData.soil_2 ?? prev.soil_2,
@@ -419,9 +451,10 @@ const App = () => {
         last_update: newStatus.last_update ?? new Date().toISOString()
       }));
       
-      // ⭐ Update ESP connected state from status_update's sensor_fresh field
+      // ⭐ Update Node 1 connected state from status_update's sensor_fresh field
       if (typeof newStatus.sensor_fresh === 'boolean') {
-        setEspConnected(newStatus.sensor_fresh);
+        setNode1Connected(newStatus.sensor_fresh);
+        setLastNode1Update(Date.now());
       }
 
       // Update relay modes if received from backend
@@ -631,6 +664,8 @@ const App = () => {
       const soil1 = sensorData.soil_1?.hum || 0;
       const soil2 = sensorData.soil_2?.hum || 0;
       return soil1 && soil2 ? ((soil1 + soil2) / 2).toFixed(1) : soil1.toFixed(1) || soil2.toFixed(1);
+    } else if (param === 'soil_moisture_1') {
+      return (sensorData.soil_2?.hum || 0).toFixed(1);  // ดิน 1 แปลง 1 (SN-300SD)
     } else if (param === 'soil_2_hum') {
       return (sensorData.soil_2?.hum || 0).toFixed(1);
     } else if (param === 'temp') {
@@ -737,16 +772,27 @@ const App = () => {
 
       {/* MONITOR TAB */}
       {activeTab === 'monitor' && (
-        <SensorFreshContext.Provider value={espConnected}>
+        <SensorFreshContext.Provider value={node1Connected}>
         <div style={{ display: 'flex', flexDirection: 'column', gap: '24px', background: '#f4f6f8', padding: '20px', borderRadius: '12px' }}>
 
-          {/* ===== Banner: ยังไม่มีสัญญาณจาก ESP32 ===== */}
-          {espReady && !espConnected && (
-            <div style={{ display: 'flex', alignItems: 'center', gap: '12px', background: '#fff8e1', border: '1px solid #ffca28', borderRadius: '10px', padding: '12px 18px', color: '#795548' }}>
+          {/* ===== Banner: Node 1 ไม่ตอบสนอง ===== */}
+          {espReady && !node1Connected && (
+            <div style={{ display: 'flex', alignItems: 'center', gap: '12px', background: '#ffebee', border: '1px solid #ef5350', borderRadius: '10px', padding: '12px 18px', color: '#c62828' }}>
               <span style={{ fontSize: '22px' }}>⚠️</span>
               <div>
-                <div style={{ fontWeight: 'bold', fontSize: '14px' }}>ยังไม่ได้รับข้อมูลจาก ESP32</div>
-                <div style={{ fontSize: '12px', marginTop: '2px' }}>ค่าที่แสดงด้วย "–" คือยังไม่มีสัญญาณ กรุณาตรวจสอบการเชื่อมต่อ ESP32</div>
+                <div style={{ fontWeight: 'bold', fontSize: '14px' }}>Node 1 ไม่ตอบสนอง</div>
+                <div style={{ fontSize: '12px', marginTop: '2px' }}>เซนเซอร์อากาศและดินแปลง 1 ไม่มีสัญญาณ กรุณาตรวจสอบการเชื่อมต่อ ESP32 Node 1</div>
+              </div>
+            </div>
+          )}
+
+          {/* ===== Banner: Node 3 ไม่ตอบสนอง ===== */}
+          {espReady && !node3Connected && (
+            <div style={{ display: 'flex', alignItems: 'center', gap: '12px', background: '#fff3e0', border: '1px solid #fb8c00', borderRadius: '10px', padding: '12px 18px', color: '#e65100' }}>
+              <span style={{ fontSize: '22px' }}>⚠️</span>
+              <div>
+                <div style={{ fontWeight: 'bold', fontSize: '14px' }}>Node 3 (แปลง 2) ไม่ตอบสนอง</div>
+                <div style={{ fontSize: '12px', marginTop: '2px' }}>เซนเซอร์ดินแปลง 2 ไม่มีสัญญาณ กรุณาตรวจสอบการเชื่อมต่อ ESP32 Node 3</div>
               </div>
             </div>
           )}
@@ -774,8 +820,8 @@ const App = () => {
 
             <p style={{ color: '#6d4c41', fontSize: '12px', fontWeight: 'bold', marginBottom: '8px', letterSpacing: '1px', borderBottom: '1px solid #efebe9', paddingBottom: '6px' }}>💧 ความชื้นดิน</p>
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: '12px', marginBottom: '16px' }}>
-              <SensorCard title="💧 Sensor ดิน 1 แปลง 1"     value={sensorData.soil_1.hum}  unit="%" color="#a1887f" />
-              <SensorCard title="💧 Sensor ดิน 2 แปลง 1"     value={sensorData.soil_2.hum}  unit="%" color="#bcaaa4" textColor="#333"/>
+              <SensorCard title="💧 Sensor ดิน 1 แปลง 1"     value={sensorData.soil_2.hum}  unit="%" color="#bcaaa4" textColor="#333"/>
+              <SensorCard title="💧 Sensor ดิน 2 แปลง 1"     value={sensorData.soil_1.hum}  unit="%" color="#a1887f" />
               <SensorCard title="💧 Sensor ดิน 3 แปลง 1"     value={typeof soilSensors.soil_2 === 'object' ? soilSensors.soil_2?.hum ?? 0.0 : soilSensors.soil_2 ?? 0.0} unit="%" color="#d7ccc8" textColor="#333"/>
             </div>
 
@@ -798,8 +844,8 @@ const App = () => {
 
             <p style={{ color: '#388e3c', fontSize: '12px', fontWeight: 'bold', marginBottom: '8px', letterSpacing: '1px', borderBottom: '1px solid #e8f5e9', paddingBottom: '6px' }}>💧 ความชื้นดิน</p>
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: '12px', marginBottom: '16px' }}>
-              <SensorCard title="💧 Sensor ดิน 1 แปลง 2" value={typeof soilSensors.soil_1 === 'object' ? soilSensors.soil_1?.hum ?? 0.0 : soilSensors.soil_1 ?? 0.0} unit="%" color="#66bb6a" />
-              <SensorCard title="💧 Sensor ดิน 2 แปลง 2" value={typeof soilSensors.soil_3 === 'object' ? soilSensors.soil_3?.hum ?? 0.0 : soilSensors.soil_3 ?? 0.0} unit="%" color="#81c784" textColor="#333"/>
+              <SensorCard title="💧 Sensor ดิน 1 แปลง 2" value={typeof soilSensors.soil_3 === 'object' ? soilSensors.soil_3?.hum ?? 0.0 : soilSensors.soil_3 ?? 0.0} unit="%" color="#81c784" textColor="#333"/>
+              <SensorCard title="💧 Sensor ดิน 2 แปลง 2" value={typeof soilSensors.soil_1 === 'object' ? soilSensors.soil_1?.hum ?? 0.0 : soilSensors.soil_1 ?? 0.0} unit="%" color="#66bb6a" />
               <SensorCard title="💧 Sensor ดิน 3 แปลง 2" value={typeof soilSensors.soil_4 === 'object' ? soilSensors.soil_4?.hum ?? 0.0 : soilSensors.soil_4 ?? 0.0} unit="%" color="#a5d6a7" textColor="#333"/>
             </div>
 
@@ -820,12 +866,12 @@ const App = () => {
       {activeTab === 'control' && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: '24px' }}>
 
-          {/* Banner: ESP32 ยังไม่ได้เชื่อมต่อ */}
-          {espReady && !espConnected && (
-            <div style={{ display: 'flex', alignItems: 'center', gap: '10px', background: '#fff8e1', border: '1px solid #ffca28', borderRadius: '8px', padding: '10px 16px', color: '#795548' }}>
+          {/* Banner: Node 1 ไม่ตอบสนอง (สำหรับควบคุม) */}
+          {espReady && !node1Connected && (
+            <div style={{ display: 'flex', alignItems: 'center', gap: '10px', background: '#ffebee', border: '1px solid #ef5350', borderRadius: '8px', padding: '10px 16px', color: '#c62828' }}>
               <span style={{ fontSize: '20px' }}>⚠️</span>
               <div>
-                <div style={{ fontWeight: 'bold', fontSize: '13px' }}>ESP32 ยังไม่ได้เชื่อมต่อ</div>
+                <div style={{ fontWeight: 'bold', fontSize: '13px' }}>Node 1 ไม่ตอบสนอง</div>
                 <div style={{ fontSize: '12px', marginTop: '2px' }}>สถานะรีเลย์ที่แสดงคือ <strong>สถานะล่าสุดที่บันทึกไว้</strong> — อาจไม่ตรงกับสถานะจริงของอุปกรณ์</div>
               </div>
             </div>
@@ -848,7 +894,7 @@ const App = () => {
                   handleAutoClick={handleAutoClick}
                   toggleRelay={toggleRelay}
                   relayConfigs={relayConfigs}
-                  espConnected={espConnected}
+                  espConnected={node1Connected}
                 />
               ))}
             </div>
@@ -871,7 +917,7 @@ const App = () => {
                   handleAutoClick={handleAutoClick}
                   toggleRelay={toggleRelay}
                   relayConfigs={relayConfigs}
-                  espConnected={espConnected}
+                  espConnected={node1Connected}
                 />
               ))}
             </div>
@@ -894,7 +940,7 @@ const App = () => {
                   handleAutoClick={handleAutoClick}
                   toggleRelay={toggleRelay}
                   relayConfigs={relayConfigs}
-                  espConnected={espConnected}
+                  espConnected={node1Connected}
                 />
               ))}
             </div>
@@ -962,14 +1008,14 @@ const App = () => {
                       <option value="lux">☀️ แสง (lx)</option>
                       <option value="co2">🌬️ CO₂ (ppm)</option>
                       <optgroup label="💧 ความชื้นดิน — แปลง 1">
-                        <option value="soil_hum">Sensor ดิน1 แปลง1 (%)</option>
-                        <option value="soil_2_hum">Sensor ดิน 2 แปลง1 (%)</option>
-                        <option value="s2_hum">Sensor ดิน 3 แปลง1 (%)</option>
+                        <option value="soil_moisture_1">Sensor ดิน 1 แปลง 1 (%)</option>
+                        <option value="soil_hum">Sensor ดิน 2 แปลง 1 (%)</option>
+                        <option value="s2_hum">Sensor ดิน 3 แปลง 1 (%)</option>
                       </optgroup>
                       <optgroup label="💧 ความชื้นดิน — แปลง 2">
-                        <option value="s1_hum">Sensor ดิน 1 แปลง2 (%)</option>
-                        <option value="s3_hum">Sensor ดิน 2 แปลง2 (%)</option>
-                        <option value="s4_hum">Sensor ดิน 3 แปลง2 (%)</option>
+                        <option value="s1_hum">Sensor ดิน 2 แปลง 2 (%)</option>
+                        <option value="s3_hum">Sensor ดิน 1 แปลง 2 (%)</option>
+                        <option value="s4_hum">Sensor ดิน 3 แปลง 2 (%)</option>
                       </optgroup>
                     </select>
                   </div>
@@ -1000,14 +1046,14 @@ const App = () => {
                       <option value="lux">☀️ แสง (lx)</option>
                       <option value="co2">🌬️ CO₂ (ppm)</option>
                       <optgroup label="💧 ความชื้นดิน — แปลง 1">
-                        <option value="soil_hum">Sensor ดิน1 แปลง1 (%)</option>
-                        <option value="soil_2_hum">Sensor ดิน 2 แปลง1 (%)</option>
-                        <option value="s2_hum">Sensor ดิน 3 แปลง1 (%)</option>
+                        <option value="soil_moisture_1">Sensor ดิน 1 แปลง 1 (%)</option>
+                        <option value="soil_hum">Sensor ดิน 2 แปลง 1 (%)</option>
+                        <option value="s2_hum">Sensor ดิน 3 แปลง 1 (%)</option>
                       </optgroup>
                       <optgroup label="💧 ความชื้นดิน — แปลง 2">
-                        <option value="s1_hum">Sensor ดิน 1 แปลง2 (%)</option>
-                        <option value="s3_hum">Sensor ดิน 2 แปลง2 (%)</option>
-                        <option value="s4_hum">Sensor ดิน 3 แปลง2 (%)</option>
+                        <option value="s1_hum">Sensor ดิน 2 แปลง 2 (%)</option>
+                        <option value="s3_hum">Sensor ดิน 1 แปลง 2 (%)</option>
+                        <option value="s4_hum">Sensor ดิน 3 แปลง 2 (%)</option>
                       </optgroup>
                     </select>
                   </div>
@@ -1038,14 +1084,14 @@ const App = () => {
                     <option value="lux">☀️ แสง (lx)</option>
                     <option value="co2">🌬️ CO₂ (ppm)</option>
                     <optgroup label="💧 ความชื้นดิน — แปลง 1">
-                      <option value="soil_hum">Sensor ดิน1 แปลง1 (%)</option>
-                      <option value="soil_2_hum">Sensor ดิน 2 แปลง1 (%)</option>
-                      <option value="s2_hum">Sensor ดิน 3 แปลง1 (%)</option>
+                      <option value="soil_moisture_1">Sensor ดิน 1 แปลง 1 (%)</option>
+                      <option value="soil_hum">Sensor ดิน 2 แปลง 1 (%)</option>
+                      <option value="s2_hum">Sensor ดิน 3 แปลง 1 (%)</option>
                     </optgroup>
                     <optgroup label="💧 ความชื้นดิน — แปลง 2">
-                      <option value="s1_hum">Sensor ดิน 1 แปลง2 (%)</option>
-                      <option value="s3_hum">Sensor ดิน 2 แปลง2 (%)</option>
-                      <option value="s4_hum">Sensor ดิน 3 แปลง2 (%)</option>
+                      <option value="s1_hum">Sensor ดิน 2 แปลง 2 (%)</option>
+                      <option value="s3_hum">Sensor ดิน 1 แปลง 2 (%)</option>
+                      <option value="s4_hum">Sensor ดิน 3 แปลง 2 (%)</option>
                     </optgroup>
                   </select>
                 </div>
@@ -1076,12 +1122,12 @@ const App = () => {
 
       {/* DATA TABLE TAB */}
       {activeTab === 'data' && (
-        <DataTablePage espConnected={espConnected} />
+        <DataTablePage espConnected={node1Connected} />
       )}
 
       {/* GRAPH TAB */}
       {activeTab === 'graph' && (
-        <GraphPage espConnected={espConnected} />
+        <GraphPage espConnected={node1Connected} />
       )}
     </div>
   );

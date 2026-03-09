@@ -13,8 +13,8 @@ export default function MonitorPage({ displayData }) {
         {/* --- แถวที่ 1: ค่าหลัก 4 ตัว --- */}
         <div className="h-36"><Card title="Air Temp" value={`${displayData.airTemp.toFixed(1)} °C`} /></div>
         <div className="h-36"><Card title="Humidity" value={`${displayData.hum.toFixed(1)} %`} /></div>
-        <div className="h-36"><Card title="Soil Moist (SN-3002)" value={`${displayData.soil.toFixed(1)} %`} /></div>
-        <div className="h-36"><Card title="Moisture1 (SN-300SD)" value={`${displayData.soilMoisture1.toFixed(1)} %`} /></div>
+        <div className="h-36"><Card title="ดิน 2 แปลง 1" value={`${displayData.soil.toFixed(1)} %`} /></div>
+        <div className="h-36"><Card title="ดิน 1 แปลง 1" value={`${displayData.soilMoisture1.toFixed(1)} %`} /></div>
 
         {/* --- แถวที่ 2: NPK --- */}
         {/* ปรับเหลือ h-40 (ประมาณ 160px) ให้พอดีเนื้อหา */}
@@ -41,10 +41,10 @@ export default function MonitorPage({ displayData }) {
             <div className="col-span-2 lg:col-span-4 my-2">
               <h3 className="text-sm font-bold text-gray-600 px-1">🌱 Node 3 - Soil Moisture Sensors</h3>
             </div>
-            <div className="h-36"><Card title="Sensor 1" value={`${(displayData.soilSensors.soil_1 || 0).toFixed(1)} %`} /></div>
-            <div className="h-36"><Card title="Sensor 2" value={`${(displayData.soilSensors.soil_2 || 0).toFixed(1)} %`} /></div>
-            <div className="h-36"><Card title="Sensor 3" value={`${(displayData.soilSensors.soil_3 || 0).toFixed(1)} %`} /></div>
-            <div className="h-36"><Card title="Sensor 4" value={`${(displayData.soilSensors.soil_4 || 0).toFixed(1)} %`} /></div>
+            <div className="h-36"><Card title="ดิน 2 แปลง 2" value={`${(displayData.soilSensors.soil_1 || 0).toFixed(1)} %`} /></div>
+            <div className="h-36"><Card title="ดิน 3 แปลง 1" value={`${(displayData.soilSensors.soil_2 || 0).toFixed(1)} %`} /></div>
+            <div className="h-36"><Card title="ดิน 1 แปลง 2" value={`${(displayData.soilSensors.soil_3 || 0).toFixed(1)} %`} /></div>
+            <div className="h-36"><Card title="ดิน 3 แปลง 2" value={`${(displayData.soilSensors.soil_4 || 0).toFixed(1)} %`} /></div>
           </>
         )}
 

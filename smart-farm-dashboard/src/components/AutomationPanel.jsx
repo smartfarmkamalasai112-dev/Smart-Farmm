@@ -2,18 +2,18 @@ import React, { useState, useEffect } from 'react';
 import { Save, Settings, Info } from 'lucide-react';
 
 const DEVICE_NAMES = [
-  "ปั้มแปลง1 (Pump)",
+  "ปั้มแปลง1 (ดิน 2 แปลง 1)",
   "พัดลม (Fan)",
   "ไฟส่องสว่าง (Lamp)",
   "พ่นหมอก (Mist)",
-  "ปั้มแปลง2 (Plot Pump 2)",
+  "ปั้มแปลง2 (ดิน 2 แปลง 2)",
   "ปั้ม Evap (EvapPump)",
-  "วาล์ว1 (V1-P1)",
-  "วาล์ว2 (V2-P1)",
-  "วาล์ว3 (V3-P1)",
-  "วาล์ว1 (V1-P2)",
-  "วาล์ว2 (V2-P2)",
-  "วาล์ว3 (V3-P2)"
+  "วาล์ว1 (ดิน 1 แปลง 1)",
+  "วาล์ว2 (ดิน 3 แปลง 1)",
+  "วาล์ว3 (ดิน 1 แปลง 2)",
+  "วาล์ว1-P2 (ดิน 2 แปลง 2)",
+  "วาล์ว2-P2 (ดิน 3 แปลง 2)",
+  "วาล์ว3-P2 (V3-P2)"
 ];
 const UNIT_LABELS = [
   "% (Moisture)",

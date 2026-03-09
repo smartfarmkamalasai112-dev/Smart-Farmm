@@ -301,9 +301,10 @@ void loop() {
     // 2. Soil 7-in-1 Sensor
     delay(50);
     if (nodeSoil.readHoldingRegisters(REG_SOIL_HUM, 7) == nodeSoil.ku8MBSuccess) {
-      data.soil_hum  = nodeSoil.getResponseBuffer(0) / 10.0f; 
+      data.soil_hum  = nodeSoil.getResponseBuffer(0) / 10.0f;  // factory default
       data.soil_temp = nodeSoil.getResponseBuffer(1) / 10.0f;
-      data.soil_ph   = nodeSoil.getResponseBuffer(3) / 10.0f;
+      uint16_t raw_ph1 = nodeSoil.getResponseBuffer(3);
+      data.soil_ph   = (raw_ph1 > 0) ? (raw_ph1 / 10.0f) : 0.0f;  // factory default
       data.soil_n    = nodeSoil.getResponseBuffer(4);
       data.soil_p    = nodeSoil.getResponseBuffer(5);
       data.soil_k    = nodeSoil.getResponseBuffer(6);
@@ -316,7 +317,7 @@ void loop() {
     if (resultSoil1 == nodeSoil1.ku8MBSuccess) {
       uint16_t val = nodeSoil1.getResponseBuffer(1);
       if (val == 0) val = nodeSoil1.getResponseBuffer(0);
-      data.soil_moisture_1 = val / 10.0f;
+      data.soil_moisture_1 = (val / 10.0f);  // no offset - factory default
     } else {
       data.soil_moisture_1 = 0;
     }

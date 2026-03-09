@@ -5,17 +5,17 @@ import AutomationPanel from '../components/AutomationPanel';
 const API_URL = `http://${window.location.hostname}:5000`;
 
 const PARAM_LABELS = {
-  soil_hum:  { label: 'ความชื้นดิน',   unit: '%',    icon: '🌱' },
-  soil_2_hum:{ label: 'ความชื้นดิน2',  unit: '%',    icon: '🌱' },
-  temp:      { label: 'อุณหภูมิ',       unit: '°C',   icon: '🌡️' },
-  hum:       { label: 'ความชื้นอากาศ', unit: '%',    icon: '💧' },
-  lux:       { label: 'แสง',           unit: 'lux',  icon: '☀️' },
-  co2:       { label: 'CO₂',           unit: 'ppm',  icon: '🌫️' },
-  s1_hum:    { label: 'ดิน S1',        unit: '%',    icon: '🌱' },
-  s1_ph:     { label: 'pH S1',         unit: '',     icon: '🧪' },
-  s2_hum:    { label: 'ดิน S2',        unit: '%',    icon: '🌱' },
-  s3_hum:    { label: 'ดิน S3',        unit: '%',    icon: '🌱' },
-  s4_hum:    { label: 'ดิน S4',        unit: '%',    icon: '🌱' },
+  soil_hum:       { label: 'ดิน 2 แปล1 (SN-3002)',    unit: '%',    icon: '🌱' },
+  soil_moisture_1:{ label: 'ดิน 1 แปล1 (SN-300SD)',  unit: '%',    icon: '🌱' },
+  temp:           { label: 'อุณหภูมิ',                unit: '°C',   icon: '🌡️' },
+  hum:            { label: 'ความชื้นอากาศ',        unit: '%',    icon: '💧' },
+  lux:            { label: 'แสง',                  unit: 'lux',  icon: '☀️' },
+  co2:            { label: 'CO₂',                 unit: 'ppm',  icon: '🌫️' },
+  s1_hum:         { label: 'ดิน 2 แปล2 (Node3 S1)',  unit: '%',    icon: '🌱' },
+  s1_ph:          { label: 'pH ดิน 2 แปล2',          unit: '',     icon: '🧪' },
+  s2_hum:         { label: 'ดิน 3 แปล1 (Node3 S2)',  unit: '%',    icon: '🌱' },
+  s3_hum:         { label: 'ดิน 1 แปล2 (Node3 S3)',  unit: '%',    icon: '🌱' },
+  s4_hum:         { label: 'ดิน 3 แปล2 (Node3 S4)',  unit: '%',    icon: '🌱' },
 };
 
 function getParamInfo(param) {
@@ -29,7 +29,7 @@ export default function AutomationPage({ displayData, onSaveConfig, isSidebarOpe
   const [selectedRelayIndex, setSelectedRelayIndex] = useState(null);
   const [tempConfig, setTempConfig] = useState({});
 
-  const RELAY_NAMES = ['ปั้มแปลง1 (Pump)', 'พัดลม (Fan)', 'ไฟส่องสว่าง (Lamp)', 'พ่นหมอก (Mist)', 'ปั้มแปลง2 (Plot Pump 2)', 'ปั้ม Evap (EvapPump)', 'วาล์ว1 (V1-P1)', 'วาล์ว2 (V2-P1)', 'วาล์ว3 (V3-P1)', 'วาล์ว1 (V1-P2)', 'วาล์ว2 (V2-P2)', 'วาล์ว3 (V3-P2)'];
+  const RELAY_NAMES = ['ปั้มแปล1 (ดิน 2 แปล1)', 'พัดลม (Fan)', 'ไฟส่องสว่าง (Lamp)', 'พ่นหมอก (Mist)', 'ปั้มแปล2 (ดิน 2 แปล2)', 'ปั้ม Evap (EvapPump)', 'วาล์ว1 (ดิน 1 แปล1)', 'วาล์ว2 (ดิน 3 แปล1)', 'วาล์ว3 (ดิน 1 แปล2)', 'วาล์ว1-P2 (ดิน 2 แปล2)', 'วาล์ว2-P2 (ดิน 3 แปล2)', 'วาล์ว3-P2 (V3-P2)'];
 
   useEffect(() => {
     const fetchConfigs = async () => {
