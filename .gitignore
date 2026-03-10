@@ -9,10 +9,7 @@ __pycache__/
 *.pyc
 
 # ไฟล์ขยะของ Node.js (React)
-node_modules/
-dist/
 .DS_Store
 
 # ไฟล์ขยะของ PlatformIO
-.pio/
 .vscode/
