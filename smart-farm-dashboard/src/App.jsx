@@ -474,6 +474,22 @@ const App = () => {
       }
     });
 
+    // ⚡ REAL-TIME: relay_update fires instantly when ONE relay changes (faster than status_update)
+    socket.on('relay_update', (data) => {
+      const { relay_index, state, mode } = data;
+      console.log(`⚡ Relay Update: relay_${relay_index} = ${state} (${mode})`);
+      // Update single relay state immediately
+      setStatusData(prev => {
+        const newRelays = [...prev.relays];
+        newRelays[relay_index] = state;
+        return { ...prev, relays: newRelays };
+      });
+      // Update mode if provided
+      if (mode) {
+        setRelayModes(prev => ({ ...prev, [relay_index]: mode }));
+      }
+    });
+
     return () => {
       socket.off('connect');
       socket.off('disconnect');
@@ -482,8 +498,9 @@ const App = () => {
       socket.off('reconnect');
       socket.off('reconnect_error');
       socket.off('sensor_update');
-      socket.off('soil_sensors_update');  // ⭐ NEW
+      socket.off('soil_sensors_update');
       socket.off('status_update');
+      socket.off('relay_update');
       socket.close();
     };
   }, []);

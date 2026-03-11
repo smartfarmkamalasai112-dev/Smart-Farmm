@@ -1380,7 +1380,14 @@ def control_relay():
         except Exception as e:
             logger.warning(f"⚠️ Could not log relay action: {e}")
         
-        # Broadcast status update with mode info
+        # ⚡ REAL-TIME: emit relay_update instantly for this one relay (faster than status_update)
+        socketio.emit('relay_update', {
+            'relay_index': relay_index,
+            'state': relay_state,
+            'mode': 'MANUAL',
+            'source': 'MANUAL_API'
+        }, to=None)
+        # Also broadcast full status update
         socketio.emit('status_update', build_status_payload(), to=None)
         logger.info(f"✅ Status broadcasted to all clients")
         
