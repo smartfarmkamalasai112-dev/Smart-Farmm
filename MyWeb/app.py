@@ -154,11 +154,11 @@ relay_configs = {
     4: {'target': 35.0, 'condition': '<', 'param': 's1_hum'},            # Relay 4  - ปั้มแปล2 (ดิน 2 แปล2 - Node3 S1)
     5: {'target': 35.0, 'condition': '<', 'param': 'soil_hum'},          # Relay 5  - EvapPump (ดิน 2 แปล1)
     6: {'target': 50.0, 'condition': '<', 'param': 'soil_moisture_1'},   # Relay 6  - วาล์ว1 (ดิน 1 แปล1 - SN-300SD)
-    7: {'target': 50.0, 'condition': '<', 'param': 's2_hum'},            # Relay 7  - วาล์ว2 (ดิน 3 แปล1 - Node3 S2)
-    8: {'target': 50.0, 'condition': '<', 'param': 's3_hum'},            # Relay 8  - วาล์ว3 (ดิน 1 แปล2 - Node3 S3)
-    9: {'target': 50.0, 'condition': '<', 'param': 's1_hum'},            # Relay 9  - วาล์ว1-P2 (ดิน 2 แปล2 - Node3 S1)
-    10: {'target': 50.0, 'condition': '<', 'param': 's4_hum'},           # Relay 10 - วาล์ว2-P2 (ดิน 3 แปล2 - Node3 S4)
-    11: {'target': 50.0, 'condition': '<', 'param': 's4_hum'}            # Relay 11 - วาล์ว3-P2 (ดิน 3 แปล2 - Node3 S4)
+    7: {'target': 50.0, 'condition': '<', 'param': 'soil_hum'},            # Relay 7  - วาล์ว2 (ดิน 2 แปล1 - SN-3002)
+    8: {'target': 50.0, 'condition': '<', 'param': 's2_hum'},             # Relay 8  - วาล์ว3 (ดิน 3 แปล1 - Node3 S2)
+    9: {'target': 50.0, 'condition': '<', 'param': 's3_hum'},             # Relay 9  - วาล์ว1-P2 (ดิน 1 แปล2 - Node3 S3)
+    10: {'target': 50.0, 'condition': '<', 'param': 's1_hum'},            # Relay 10 - วาล์ว2-P2 (ดิน 2 แปล2 - Node3 S1)
+    11: {'target': 50.0, 'condition': '<', 'param': 's4_hum'}             # Relay 11 - วาล์ว3-P2 (ดิน 3 แปล2 - Node3 S4)
 }
 logger.info(f"📋 Relay configs (BINARY - NO HYSTERESIS): {relay_configs}")
 
@@ -344,26 +344,9 @@ def reset_all_relay_states():
             logger.warning(f"⚠️ Relay {relay_idx} has no config, using default")
     logger.info(f"✅ relay_configs: {len(relay_configs)} entries (0-11)")
     
-    # STEP 3: Clear corrupted database entries
-    logger.info("📋 STEP 3: Cleaning database...")
-    try:
-        with sqlite3.connect(DB_NAME) as conn:
-            c = conn.cursor()
-            
-            # Clear all relay_history entries
-            # c.execute("DELETE FROM relay_history")
-            # deleted_count = c.rowcount
-            # logger.info(f"   ✅ Deleted {deleted_count} corrupted relay_history entries")
-            
-            # Clear all relay_configs_db entries
-            c.execute("DELETE FROM relay_configs_db")
-            deleted_count = c.rowcount
-            logger.info(f"   ✅ Deleted {deleted_count} corrupted relay_configs_db entries")
-            
-            conn.commit()
-    except Exception as e:
-        logger.error(f"❌ Database cleanup failed: {e}")
-    
+    # STEP 3: Skip delete - preserve user saved configs
+    logger.info("📋 STEP 3: Skipping database config delete — preserving user-saved configs")
+
     # STEP 4: Initialize all relays to MANUAL (safer default)
     logger.info("📋 STEP 4: Initializing relay modes...")
     logger.info(f"   ✅ All 12 relays reset to MANUAL (in-memory only)")
@@ -375,8 +358,8 @@ def reset_all_relay_states():
     # 2. Writing here would overwrite user preferences
     # 3. Only API calls and user actions should modify the database
     
-    # STEP 5: Save default configs to database
-    logger.info("📋 STEP 5: Saving default configs to database...")
+    # STEP 5: Save DEFAULT configs to database ONLY for relays that don't have a saved config
+    logger.info("📋 STEP 5: Saving default configs to database (only for missing relays)...")
     try:
         with sqlite3.connect(DB_NAME) as conn:
             c = conn.cursor()
@@ -385,14 +368,15 @@ def reset_all_relay_states():
                 if relay_idx in relay_configs:
                     config = relay_configs[relay_idx]
                     json_str = json.dumps(config)
+                    # ⭐ INSERT OR IGNORE: Only saves if no existing config in DB
                     c.execute(
-                        "INSERT OR REPLACE INTO relay_configs_db (relay_index, config) VALUES (?, ?)",
+                        "INSERT OR IGNORE INTO relay_configs_db (relay_index, config) VALUES (?, ?)",
                         (relay_idx, json_str)
                     )
-                    logger.info(f"   ✅ Relay {relay_idx}: Config saved - {config}")
+                    logger.info(f"   ✅ Relay {relay_idx}: Default saved (if not already in DB) - {config}")
             
             conn.commit()
-            logger.info(f"✅ All 12 relay configs saved to database")
+            logger.info(f"✅ Default relay configs saved for missing relays only")
     except Exception as e:
         logger.error(f"❌ Failed to save configs to database: {e}")
     
@@ -853,7 +837,12 @@ def evaluate_auto_mode(normalized_sensors):
                 condition2 = str(config.get('condition2', '<')).strip()
                 param2 = str(config.get('param2', 'hum')).strip()
                 
-                logic = str(config.get('logic', 'OR')).strip().upper()  # Default to OR
+                logic = str(config.get('logic', 'OR')).strip().upper()
+                # ⭐ Handle frontend symbols: '&&' = AND, '||' = OR
+                if logic == '&&':
+                    logic = 'AND'
+                elif logic == '||':
+                    logic = 'OR'
 
                 sensor_dict = {
                     'soil_hum': soil_hum,               # Average of soil_1 & soil_2 (Node 1)
