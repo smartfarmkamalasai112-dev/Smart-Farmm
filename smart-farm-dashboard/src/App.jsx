@@ -38,6 +38,16 @@ const PARAM_INFO = {
 };
 const getParamInfo = (param) => PARAM_INFO[param] || { label: param, unit: '', icon: '📡' };
 
+// 🔒 Locked sensor mapping for valve relays (6-11) — ไม่อนุญาตให้เปลี่ยน sensor
+const VALVE_SENSOR_LOCK = {
+  6:  'soil_moisture_1',  // วาล์ว 1 แปลง 1 → ดิน 1 แปลง 1 (SN-300SD)
+  7:  'soil_hum',         // วาล์ว 2 แปลง 1 → ดิน 2 แปลง 1 (SN-3002)
+  8:  's2_hum',           // วาล์ว 3 แปลง 1 → ดิน 3 แปลง 1 (Node3 S2)
+  9:  's3_hum',           // วาล์ว 1 แปลง 2 → ดิน 1 แปลง 2 (Node3 S3)
+  10: 's1_hum',           // วาล์ว 2 แปลง 2 → ดิน 2 แปลง 2 (Node3 S1)
+  11: 's4_hum',           // วาล์ว 3 แปลง 2 → ดิน 3 แปลง 2 (Node3 S4)
+};
+
 /**
  * Main Smart Farm Dashboard Component
  * Original Design - ออกแบบดั้งเดิม
@@ -174,7 +184,7 @@ const App = () => {
       const getSensorValue = (param) => {
         switch(param) {
           case 'soil_hum':
-            return ((sensorData.soil_1?.hum || 0) + (sensorData.soil_2?.hum || 0)) / 2;
+            return sensorData.soil_1?.hum || 0;  // ดิน 2 แปลง 1 (SN-3002)
           case 'soil_moisture_1':
             return sensorData.soil_2?.hum || 0;  // ดิน 1 แปลง 1 (SN-300SD)
           case 'soil_2_hum':
@@ -569,6 +579,8 @@ const App = () => {
       return;
     }
     const currentConfig = relayConfigs[index] || {};
+    // 🔒 ถ้าเป็น valve relay (6-11) ให้ lock sensor ตายตัว
+    const lockedParam = VALVE_SENSOR_LOCK[index];
     setTempAutoConfig({
       param1: currentConfig.param1 || 'temp',
       condition1: currentConfig.condition1 || '>',
@@ -577,9 +589,9 @@ const App = () => {
       param2: currentConfig.param2 || 'hum',
       condition2: currentConfig.condition2 || '>',
       target2: currentConfig.target2 != null ? String(currentConfig.target2) : '80',
-      param: currentConfig.param || 'soil_hum',
+      param: lockedParam || currentConfig.param || 'soil_hum',
       condition: currentConfig.condition || '<',
-      target: currentConfig.target != null ? String(currentConfig.target) : '40',
+      target: currentConfig.target != null ? String(currentConfig.target) : '50',
     });
     setPendingAutoRelayIndex(index);
     setShowAutoModal(true);
@@ -661,9 +673,7 @@ const App = () => {
    */
   const getCurrentSensorValue = (param) => {
     if (param === 'soil_hum') {
-      const soil1 = sensorData.soil_1?.hum || 0;
-      const soil2 = sensorData.soil_2?.hum || 0;
-      return soil1 && soil2 ? ((soil1 + soil2) / 2).toFixed(1) : soil1.toFixed(1) || soil2.toFixed(1);
+      return (sensorData.soil_1?.hum || 0).toFixed(1);  // ดิน 2 แปลง 1 (SN-3002)
     } else if (param === 'soil_moisture_1') {
       return (sensorData.soil_2?.hum || 0).toFixed(1);  // ดิน 1 แปลง 1 (SN-300SD)
     } else if (param === 'soil_2_hum') {
@@ -1007,16 +1017,6 @@ const App = () => {
                       <option value="hum">💨 ความชื้นอากาศ (%)</option>
                       <option value="lux">☀️ แสง (lx)</option>
                       <option value="co2">🌬️ CO₂ (ppm)</option>
-                      <optgroup label="💧 ความชื้นดิน — แปลง 1">
-                        <option value="soil_moisture_1">Sensor ดิน 1 แปลง 1 (%)</option>
-                        <option value="soil_hum">Sensor ดิน 2 แปลง 1 (%)</option>
-                        <option value="s2_hum">Sensor ดิน 3 แปลง 1 (%)</option>
-                      </optgroup>
-                      <optgroup label="💧 ความชื้นดิน — แปลง 2">
-                        <option value="s1_hum">Sensor ดิน 2 แปลง 2 (%)</option>
-                        <option value="s3_hum">Sensor ดิน 1 แปลง 2 (%)</option>
-                        <option value="s4_hum">Sensor ดิน 3 แปลง 2 (%)</option>
-                      </optgroup>
                     </select>
                   </div>
                   <div style={{ flex: 0.7, minWidth: '100px' }}>
@@ -1045,16 +1045,6 @@ const App = () => {
                       <option value="hum">💨 ความชื้นอากาศ (%)</option>
                       <option value="lux">☀️ แสง (lx)</option>
                       <option value="co2">🌬️ CO₂ (ppm)</option>
-                      <optgroup label="💧 ความชื้นดิน — แปลง 1">
-                        <option value="soil_moisture_1">Sensor ดิน 1 แปลง 1 (%)</option>
-                        <option value="soil_hum">Sensor ดิน 2 แปลง 1 (%)</option>
-                        <option value="s2_hum">Sensor ดิน 3 แปลง 1 (%)</option>
-                      </optgroup>
-                      <optgroup label="💧 ความชื้นดิน — แปลง 2">
-                        <option value="s1_hum">Sensor ดิน 2 แปลง 2 (%)</option>
-                        <option value="s3_hum">Sensor ดิน 1 แปลง 2 (%)</option>
-                        <option value="s4_hum">Sensor ดิน 3 แปลง 2 (%)</option>
-                      </optgroup>
                     </select>
                   </div>
                   <div style={{ flex: 0.7, minWidth: '100px' }}>
@@ -1078,22 +1068,21 @@ const App = () => {
               <>
                 <div style={styles.formGroup}>
                   <label style={styles.label}>เซ็นเซอร์</label>
-                  <select style={styles.input} value={tempAutoConfig.param || 'soil_hum'} onChange={(e) => setTempAutoConfig({ ...tempAutoConfig, param: e.target.value })}>
-                    <option value="temp">🌡️ อุณหภูมิ (°C)</option>
-                    <option value="hum">💨 ความชื้นอากาศ (%)</option>
-                    <option value="lux">☀️ แสง (lx)</option>
-                    <option value="co2">🌬️ CO₂ (ppm)</option>
-                    <optgroup label="💧 ความชื้นดิน — แปลง 1">
-                      <option value="soil_moisture_1">Sensor ดิน 1 แปลง 1 (%)</option>
-                      <option value="soil_hum">Sensor ดิน 2 แปลง 1 (%)</option>
-                      <option value="s2_hum">Sensor ดิน 3 แปลง 1 (%)</option>
-                    </optgroup>
-                    <optgroup label="💧 ความชื้นดิน — แปลง 2">
-                      <option value="s1_hum">Sensor ดิน 2 แปลง 2 (%)</option>
-                      <option value="s3_hum">Sensor ดิน 1 แปลง 2 (%)</option>
-                      <option value="s4_hum">Sensor ดิน 3 แปลง 2 (%)</option>
-                    </optgroup>
-                  </select>
+                  {VALVE_SENSOR_LOCK[pendingAutoRelayIndex] ? (
+                    // 🔒 Locked: valve relay ใช้ sensor ตายตัว
+                    <div style={{ ...styles.input, background: '#f5f5f5', color: '#555', display: 'flex', alignItems: 'center', gap: '8px', cursor: 'not-allowed', userSelect: 'none' }}>
+                      <span>🔒</span>
+                      <span style={{ fontWeight: 'bold' }}>{getParamInfo(VALVE_SENSOR_LOCK[pendingAutoRelayIndex]).icon} {getParamInfo(VALVE_SENSOR_LOCK[pendingAutoRelayIndex]).label}</span>
+                      <span style={{ fontSize: '11px', color: '#999', marginLeft: 'auto' }}>ล็อคอัตโนมัติ</span>
+                    </div>
+                  ) : (
+                    <select style={styles.input} value={tempAutoConfig.param || 'temp'} onChange={(e) => setTempAutoConfig({ ...tempAutoConfig, param: e.target.value })}>
+                      <option value="temp">🌡️ อุณหภูมิ (°C)</option>
+                      <option value="hum">💨 ความชื้นอากาศ (%)</option>
+                      <option value="lux">☀️ แสง (lx)</option>
+                      <option value="co2">🌬️ CO₂ (ppm)</option>
+                    </select>
+                  )}
                 </div>
                 <div style={styles.formGroup}>
                   <label style={styles.label}>เงื่อนไข</label>
