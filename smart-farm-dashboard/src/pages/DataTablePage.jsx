@@ -1,7 +1,8 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { ChevronLeft, ChevronRight, Download } from 'lucide-react';
 
 export default function DataTablePage({ espConnected = true }) {
+  const exportBtnRef = useRef(null);
   const [data, setData] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
@@ -132,13 +133,13 @@ export default function DataTablePage({ espConnected = true }) {
   const sensorData = data.filter(d => d.type === 'sensor');
   const relayData = data.filter(d => d.type === 'relay');
 
-  const handleExport = async () => {
-    try {
-      // Show loading feedback
-      const btn = document.querySelector('[style*="exportBtn"]');
-      if (btn) btn.textContent = 'กำลังดาวน์โหลด...';
+  const [isExporting, setIsExporting] = useState(false);
 
-      // Fetch ALL data from backend (no limit, sorted DESC by default)
+  const handleExport = async () => {
+    if (isExporting) return;
+    setIsExporting(true);
+    try {
+      // Fetch ALL data from backend
       const response = await fetch(`http://${window.location.hostname}:5000/api/backup-data?limit=999999&offset=0`);
       const result = await response.json();
       
@@ -153,13 +154,14 @@ export default function DataTablePage({ espConnected = true }) {
         a.click();
         document.body.removeChild(a);
         window.URL.revokeObjectURL(url);
+      } else {
+        alert('ไม่มีข้อมูล');
       }
-      
-      if (btn) btn.textContent = '✓ ดาวน์โหลด CSV';
-      setTimeout(() => { if (btn) btn.textContent = 'ดาวน์โหลด CSV'; }, 2000);
     } catch (err) {
       console.error('Export error:', err);
-      alert('เกิดข้อผิดพลาดในการดาวน์โหลด');
+      alert('เกิดข้อผิดพลาดในการดาวน์โหลด: ' + err.message);
+    } finally {
+      setIsExporting(false);
     }
   };
 
@@ -475,13 +477,15 @@ export default function DataTablePage({ espConnected = true }) {
       <div style={styles.header}>
         <h2 style={styles.title}>📊 ตารางข้อมูลการทำงาน</h2>
         <button
+          ref={exportBtnRef}
           onClick={handleExport}
-          style={styles.exportBtn}
-          onMouseOver={(e) => e.target.style.backgroundColor = '#229954'}
-          onMouseOut={(e) => e.target.style.backgroundColor = '#27ae60'}
+          disabled={isExporting}
+          style={{ ...styles.exportBtn, opacity: isExporting ? 0.7 : 1, cursor: isExporting ? 'wait' : 'pointer' }}
+          onMouseOver={(e) => { if (!isExporting) e.currentTarget.style.backgroundColor = '#229954'; }}
+          onMouseOut={(e) => { if (!isExporting) e.currentTarget.style.backgroundColor = '#27ae60'; }}
         >
           <Download size={16} />
-          ดาวน์โหลด CSV
+          {isExporting ? 'กำลังดาวน์โหลด...' : 'ดาวน์โหลด CSV'}
         </button>
       </div>
 
