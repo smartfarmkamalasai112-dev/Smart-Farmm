@@ -135,28 +135,47 @@ export default function DataTablePage({ espConnected = true }) {
 
   const [isExporting, setIsExporting] = useState(false);
 
+  // ชื่อไฟล์ตามโหมด
+  const modeLabel = { all: 'ทั้งหมด', daily: 'รายวัน', weekly: 'รายสัปดาห์', monthly: 'รายเดือน' };
+  const modeFilename = { all: 'all', daily: 'daily', weekly: 'weekly', monthly: 'monthly' };
+
   const handleExport = async () => {
     if (isExporting) return;
     setIsExporting(true);
     try {
-      // Fetch ALL data from backend
-      const response = await fetch(`http://${window.location.hostname}:5000/api/backup-data?limit=999999&offset=0`);
-      const result = await response.json();
-      
-      if (result.status === 'success' && result.data) {
-        const csv = generateCSV(result.data);
-        const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
-        const url = window.URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = `farm-data-${new Date().toISOString().slice(0, 10)}.csv`;
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
-        window.URL.revokeObjectURL(url);
+      let exportData = [];
+
+      if (filterMode === 'daily') {
+        // ใช้ข้อมูลที่โหลดไว้แล้วใน hourlyData
+        exportData = hourlyData;
+      } else if (filterMode === 'weekly') {
+        exportData = weeklyData;
+      } else if (filterMode === 'monthly') {
+        exportData = monthlyData;
       } else {
-        alert('ไม่มีข้อมูล');
+        // all: ดึงทุก record
+        const response = await fetch(`http://${window.location.hostname}:5000/api/backup-data?limit=999999&offset=0`);
+        const result = await response.json();
+        if (result.status === 'success' && result.data) {
+          exportData = result.data;
+        }
       }
+
+      if (!exportData || exportData.length === 0) {
+        alert('ไม่มีข้อมูลในโหมด ' + modeLabel[filterMode]);
+        return;
+      }
+
+      const csv = generateCSV(exportData);
+      const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `farm-data-${modeFilename[filterMode]}-${new Date().toISOString().slice(0, 10)}.csv`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      window.URL.revokeObjectURL(url);
     } catch (err) {
       console.error('Export error:', err);
       alert('เกิดข้อผิดพลาดในการดาวน์โหลด: ' + err.message);
@@ -485,7 +504,7 @@ export default function DataTablePage({ espConnected = true }) {
           onMouseOut={(e) => { if (!isExporting) e.currentTarget.style.backgroundColor = '#27ae60'; }}
         >
           <Download size={16} />
-          {isExporting ? 'กำลังดาวน์โหลด...' : 'ดาวน์โหลด CSV'}
+          {isExporting ? 'กำลังดาวน์โหลด...' : `ดาวน์โหลด CSV (${modeLabel[filterMode]})`}
         </button>
       </div>
 
